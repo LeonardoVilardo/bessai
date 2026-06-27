@@ -6,7 +6,7 @@ BESSAi is a web app that helps solar PV users decide whether adding a battery en
 
 The app combines hourly solar forecasts, historical solar patterns, a simple forecast-error regression model, and a deterministic battery simulation to recommend a battery size, estimate payback, and show a practical daily dispatch strategy.
 
-The product should be general enough for any market, with the first demo scenario using Salvador, Brazil.
+The long-term product can become general, but the current MVP demo is intentionally focused on two Brazilian locations: Brasilia and West of Bahia.
 
 ## Product Positioning
 
@@ -18,7 +18,7 @@ The MVP should answer three questions clearly:
 2. How much money could it save each year?
 3. How would the battery behave tomorrow under uncertain solar forecasts?
 
-The strongest demo angle is transparency: the user can see the inputs, assumptions, dispatch chart, uncertainty adjustment, and recommendation explanation.
+The strongest demo angle is transparency: the user can see the inputs, assumptions, dispatch chart, forecast uncertainty estimate, and recommendation explanation.
 
 ## Core System Loop
 
@@ -26,8 +26,8 @@ The MVP should use this loop as its default operating model, while keeping the i
 
 1. Fetch solar forecast for the next 24 to 48 hours.
 2. Estimate forecast error using ML regression.
-3. Generate corrected solar forecast.
-4. Simulate PV generation and load.
+3. Estimate forecast uncertainty from predicted forecast error.
+4. Simulate PV generation and load from the raw forecast.
 5. Simulate battery dispatch hour by hour.
 6. Compute savings, payback, and resilience.
 7. Repeat for multiple battery sizes.
@@ -45,7 +45,7 @@ The MVP should use this loop as its default operating model, while keeping the i
 ## MVP Features
 
 - Scenario input form:
-  - latitude and longitude
+  - focused location selector for Brasilia and West of Bahia
   - existing PV size in kWp
   - average daily consumption in kWh/day
   - critical load in kW
@@ -53,7 +53,7 @@ The MVP should use this loop as its default operating model, while keeping the i
   - grid tariff per kWh
   - optional peak tariff per kWh
   - outage duration in hours/month
-- Default demo scenario for Salvador, Brazil.
+- Default demo scenario for Brasilia, Brazil, with a second West of Bahia scenario.
 - Hourly PV forecast for tomorrow.
 - Simple load profile generated from daily consumption.
 - Deterministic battery simulation at hourly time steps.
@@ -67,7 +67,7 @@ The MVP should use this loop as its default operating model, while keeping the i
   - load
   - battery state of charge
   - grid import
-- ML-corrected solar forecast using regression.
+- ML forecast-error uncertainty estimate using regression.
 - Plain-English recommendation explanation.
 - README with assumptions and local setup instructions.
 
@@ -113,7 +113,7 @@ Primary screen for the MVP.
   - backup hours
 - Chart:
   - hourly PV forecast
-  - ML-corrected PV forecast
+  - forecast-error uncertainty estimate
   - load
   - battery state of charge
   - grid import
@@ -129,7 +129,7 @@ Primary screen for the MVP.
     - extra backup hours
 - Explanation panel:
   - why this size was recommended
-  - how uncertainty changed dispatch
+  - how forecast uncertainty affects confidence
   - key assumptions
 
 ### Scenario Summary
@@ -141,9 +141,8 @@ Small read-only section showing the active assumptions and location.
 Optional MVP subsection or tab if the dashboard becomes crowded.
 
 - raw forecast
-- corrected forecast
 - forecast error estimate
-- reserve level
+- uncertainty estimate
 - dispatch table
 
 ## Tech Stack
@@ -170,7 +169,7 @@ Optional MVP subsection or tab if the dashboard becomes crowded.
 
 - scikit-learn regression model
 - target: actual_solar - forecast_solar
-- output: corrected_forecast = raw_forecast + predicted_error
+- output: forecast uncertainty based on predicted forecast error
 
 ### Data APIs
 
@@ -216,7 +215,7 @@ bessai-plan.md
 - Payback = installed battery cost / annual savings.
 - Outage backup hours = usable reserved energy / critical load.
 - Financial results must come from deterministic simulation, not ML.
-- Currency should be configurable, with BRL as the default for the Salvador demo.
+- Currency should be configurable, with BRL as the default for the Brasilia demo.
 - Peak tariff should default to 18:00 to 21:00 for the MVP.
 - Forecast data should use live Open-Meteo when available and cached or sample fallback data when live data is unavailable.
 
@@ -244,12 +243,18 @@ Initial score:
 
 ```text
 savings_score = annual_savings / max_annual_savings
-resilience_score = backup_hours / max_backup_hours
-payback_score = 1 / payback_years
+resilience_score = min(outage_backup_hours, 8) / 8
+payback_score = max(0, 1 - payback_years / 10)
 final_score = 0.5 * savings_score + 0.3 * resilience_score + 0.2 * payback_score
 ```
 
-If annual savings are zero, payback is unavailable, or a denominator is zero, the optimizer should handle the value safely and avoid selecting a battery for impossible economics.
+If annual savings are zero, payback is unavailable, or a denominator is zero, the optimizer should handle the value safely and avoid selecting a battery for impossible economics. Backup hours are capped at 8 hours for scoring so the optimizer does not automatically favor the largest battery once useful resilience has been reached.
+
+MVP recommendation rule:
+
+- If one or more battery sizes have payback <= 10 years, recommend the highest-scoring option from that payback-qualified set.
+- If no battery size has payback <= 10 years, recommend the highest-scoring option overall and clearly mark it as financially weak.
+- The explanation should state whether the selected battery passed the payback threshold.
 
 The exact score should remain simple and explainable. A slightly smaller battery with strong payback may be better than the largest battery.
 
@@ -257,17 +262,18 @@ MVP default optimization target: blended score combining annual savings, payback
 
 ## ML Role
 
-The ML model should not directly predict financial outcomes. It should only estimate solar forecast error and adjust the solar forecast used by the deterministic simulation.
+The ML model should not directly predict financial outcomes. In the MVP, it should estimate solar forecast error and present forecast uncertainty, while deterministic dispatch uses the raw Open-Meteo forecast.
 
 Core flow:
 
 ```text
-raw forecast -> ML forecast-error estimate -> corrected forecast
+raw forecast -> ML forecast-error estimate -> forecast uncertainty
 ```
 
 Then:
 
-- corrected forecast influences dispatch and reserve level
+- raw forecast drives dispatch in the MVP
+- forecast-error estimate informs the user about uncertainty
 - deterministic simulation calculates savings, payback, and backup hours
 - optimization selects a battery size from deterministic simulation outputs
 
@@ -300,17 +306,24 @@ Inputs can include:
 Output:
 
 ```text
-corrected_forecast = raw_forecast + predicted_error
+forecast_uncertainty = abs(predicted_error)
 ```
 
-If historical forecast data is not immediately available, the MVP should use a clean synthetic pipeline:
+The MVP should train on real matched forecast-error rows when practical:
+
+- Preferred practical source: Open-Meteo Previous Runs API for archived previous-day forecasts.
+- Actual comparison source: Open-Meteo Historical Weather API or NASA POWER irradiance.
+- Cache downloaded rows locally so repeated demos do not hammer APIs.
+- Validate that matched rows contain measurable forecast error; if they do not, fall back instead of pretending the model learned useful error.
+
+If real forecast-error data is not immediately available, the MVP should use a clean synthetic pipeline:
 
 - Generate plausible forecast errors.
 - Train a regression model.
 - Label it clearly but calmly as synthetic demo training.
 - Keep the interface ready for real archived forecast data later.
 
-The ML model may influence reserve and dispatch. It must not invent annual savings or payback.
+The ML model is informational in the MVP. It must not invent annual savings or payback, and it should not override the dispatch forecast until validation is strong enough to justify that behavior.
 
 ## API Endpoints
 
@@ -338,27 +351,12 @@ Returns:
 - backup hours
 - explanation
 
-### GET /forecast
-
-Returns forecast data for a location.
-
-Query params:
-
-- latitude
-- longitude
-
-Returns:
-
-- hourly raw forecast
-- corrected forecast
-- forecast-error estimate
-- metadata about data source
-
 ## Default Demo Scenario
 
-- Location: Salvador, Brazil
-- Latitude: -12.9777
-- Longitude: -38.5016
+- Location: Brasilia, Brazil
+- Latitude: -15.826016
+- Longitude: -47.812539
+- Secondary demo location: West of Bahia, Brazil at -13.792761, -46.104032
 - PV size: 4 kWp
 - Average consumption: 18 kWh/day
 - Critical load: 1.5 kW
@@ -373,44 +371,46 @@ Returns:
 
 - Optimization target: blended score combining savings, payback, and outage resilience.
 - Battery sizes: common discrete sizes first: 0, 5, 10, 13.5, 15, 20, and 30 kWh.
-- Currency: configurable, with BRL as the Salvador demo default.
+- Currency: configurable, with BRL as the Brasilia demo default.
 - Peak tariff window: 18:00 to 21:00.
 - Annualization: representative week if practical. If not, one representative day is acceptable, clearly labelled as annualized from a representative profile.
 - Forecast data: live Open-Meteo when available, with cached or sample fallback data so the demo always works.
-- ML transparency: mention synthetic training data in a small model note, not as a giant warning.
+- ML transparency: show the training source and uncertainty estimate calmly; mention synthetic training data in a small model note if fallback data is used.
 - Tone: installer/analyst-friendly, but still understandable to a homeowner.
 
 ## MVP Build Order
 
 1. Planning file.
-2. Core Python simulation that runs the Salvador default scenario.
+2. Core Python simulation that runs the Brasilia default scenario.
 3. Optimization over common discrete battery sizes.
 4. Forecast provider wrapper with a deterministic fallback.
-5. FastAPI app with `/simulate`, `/optimize`, and `/forecast`.
+5. FastAPI app with `/health`, `/simulate`, and `/optimize`.
 6. Next.js dashboard with input form, results cards, dispatch chart, and explanation.
-7. ML forecast-error correction pipeline.
+7. ML forecast-error uncertainty pipeline.
 8. UI polish and README.
 
 ## Checklist
 
 - [x] Create `bessai-plan.md`.
-- [ ] Create base project structure.
-- [ ] Build deterministic simulation engine.
-- [ ] Add default Salvador scenario.
-- [ ] Add representative load profile generator.
-- [ ] Add optimization over common discrete battery sizes.
-- [ ] Add blended scoring for savings, resilience, and payback.
-- [ ] Add forecast provider wrapper.
-- [ ] Add synthetic forecast-error ML pipeline.
-- [ ] Add FastAPI endpoints.
-- [ ] Add Next.js dashboard.
-- [ ] Add Recharts dispatch visualization.
-- [ ] Add before vs after battery comparison card.
-- [ ] Add recommendation explanation generator.
-- [ ] Add README setup instructions.
-- [ ] Verify backend runs locally.
-- [ ] Verify frontend runs locally.
-- [ ] Verify `npm run build` works.
+- [x] Create base project structure.
+- [x] Build deterministic simulation engine.
+- [x] Add default Brasilia scenario.
+- [x] Add representative load profile generator.
+- [x] Add optimization over common discrete battery sizes.
+- [x] Add blended scoring for savings, resilience, and payback.
+- [x] Add forecast provider wrapper.
+- [x] Add forecast-error ML pipeline with real Open-Meteo previous-run training rows and synthetic fallback.
+- [x] Connect ML forecast-error diagnostics to deterministic engine demo.
+- [x] Add FastAPI endpoints.
+- [x] Add NASA POWER full-year historical economics fallback path.
+- [x] Add Next.js dashboard.
+- [x] Add Recharts dispatch visualization.
+- [x] Add before vs after battery comparison card.
+- [x] Add recommendation explanation generator.
+- [x] Add README setup instructions.
+- [x] Verify backend runs locally.
+- [x] Verify frontend runs locally.
+- [x] Verify `npm run build` works.
 
 ## Open Questions
 
@@ -424,7 +424,7 @@ Returns:
 ## Product Notes
 
 - The name BESSAi is strong because it combines BESS with AI and hints at a localized first demo. The accented final character may create avoidable friction in package names, URLs, and terminal paths, so the codebase should probably use `bessai` while the product UI can display `BESSAi` or `BESSAí`.
-- The MVP should not hide behind ML. The impressive part is a credible loop: forecast, forecast correction, dispatch, economics, explanation.
+- The MVP should not hide behind ML. The impressive part is a credible loop: forecast, uncertainty estimate, dispatch, economics, explanation.
 - A deterministic fallback forecast is important. The app should still demo well without live API availability.
 - The UI should look like an operational energy tool: compact, clear, and data-forward.
 - Implementation should prefer the simplest working version when constraints appear. The defaults in this plan guide the MVP but are not rigid long-term product decisions.
