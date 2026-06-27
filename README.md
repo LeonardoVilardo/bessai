@@ -25,7 +25,7 @@ The backend requests hourly:
 - `cloud_cover`
 - `temperature_2m`
 
-The current horizon is 24 hours. If Open-Meteo is unavailable, the app uses a simple deterministic fallback profile so the demo can still run.
+The current horizon is 24 hours. If Open-Meteo is unavailable, the backend returns a clear error and the dashboard does not run dispatch from fabricated weather data.
 
 ### ML Forecast-Error Diagnostics
 
@@ -39,7 +39,7 @@ The current model is:
 
 When possible, training data is built from:
 
-- Forecast rows: Open-Meteo Previous Runs API, using previous-day forecast runs.
+- Forecast rows: Open-Meteo Previous Runs API, using previous-day forecast runs from `2024-01-01` through the current date where available.
 - Actual/reanalysis rows: Open-Meteo Historical Weather API.
 
 The matched training rows include:
@@ -53,7 +53,9 @@ The matched training rows include:
 - actual irradiance
 - forecast error
 
-If real matched forecast-error rows are unavailable or not useful, the app falls back to clearly labeled synthetic demo training data.
+If real matched forecast-error rows are unavailable or not useful, ML diagnostics are marked unavailable. The app does not train on synthetic forecast-error data.
+
+The matched forecast-error training data is cached locally under `outputs/cache/`. The cache filename includes the training window so the app does not silently reuse an old rolling window as if it were current.
 
 ### Annual Economics
 
@@ -62,7 +64,7 @@ Annual savings and payback use NASA POWER hourly historical irradiance when avai
 The current default historical window is:
 
 ```text
-2016-2025
+2001-2025
 ```
 
 For each battery size, the engine simulates each year independently, then reports:
@@ -73,21 +75,19 @@ For each battery size, the engine simulates each year independently, then report
 
 The recommendation currently uses P50 annual savings.
 
-Important: NASA POWER historical data is not a forecast. It is a historical weather-year sample used to make annual economics more realistic than multiplying one forecast day by 365. A production-grade or finance-grade version should support longer climatology windows, such as 20-30 years when available and appropriate.
+Important: NASA POWER historical data is not a forecast. It is a historical weather-year sample used to make annual economics more realistic than multiplying one forecast day by 365. The current range is 25 years because the current NASA POWER hourly endpoint accepted `2001` onward for this parameter during implementation checks. If a longer valid hourly range becomes available, the app should use it, capped at a practical maximum such as 50 years.
 
 Fallback order for annual economics:
 
-1. NASA POWER hourly data for `2016-2025`.
-2. Single NASA POWER historical year, currently `2024`.
-3. Annualized estimate from the current 24-hour forecast window.
+1. NASA POWER hourly data for the available years in `2001-2025`.
+2. If some years fail, use the real years that loaded and list the missing years in the response.
+3. If no NASA POWER historical years can be loaded, return a clear error instead of annualizing one forecast day.
+
+Downloaded NASA POWER data is cached on the local filesystem under `outputs/cache/`. That directory is ignored by Git. Supabase is not needed for this MVP cache.
 
 ## Local Setup
 
-Run these commands from the project root:
-
-```bash
-cd /Users/leovilardo/Desktop/Projects/BESSAí
-```
+Run these commands from the project root, meaning the folder that contains `README.md`, `apps/`, `packages/`, and `requirements.txt`.
 
 Install Python dependencies:
 
@@ -200,7 +200,7 @@ python3 packages/ml/run_forecast_error_demo.py
 - Peak tariff window: `18:00-21:00`.
 - Export credit: configurable value per exported kWh, default `0`.
 - Battery sizes: `0, 5, 10, 13.5, 15, 20, 30 kWh`.
-- Annual economics: NASA POWER `2016-2025` when available, with single-year and representative-day fallbacks.
+- Annual economics: NASA POWER `2001-2025` when available. No fabricated historical weather fallback is used.
 - ML: forecast-error uncertainty only; dispatch uses the raw Open-Meteo forecast.
 - Financial results come from deterministic simulation, not ML.
 
@@ -240,4 +240,4 @@ http://localhost:3001
 
 If the first optimization is slow, it is probably downloading NASA POWER historical data for the selected location. Downloaded data is cached under `outputs/cache/`, which is ignored by Git.
 
-If live API calls fail, the app should still run with fallback data, but annual economics may fall back to a less realistic estimate.
+If Open-Meteo forecast data or NASA POWER historical data is unavailable, the app should show a clear error instead of silently using fake weather data.

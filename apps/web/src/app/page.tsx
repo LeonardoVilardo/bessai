@@ -10,7 +10,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useMemo, useState } from "react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
@@ -95,11 +95,11 @@ type MlDiagnostics = {
   model_source: string;
   training_rows: number;
   training_period: string;
-  mae_before_correction_w_m2: number;
-  mae_after_correction_w_m2: number;
-  mean_forecast_error_w_m2: number;
-  mean_forecast_uncertainty_w_m2: number;
-  max_forecast_uncertainty_w_m2: number;
+  mae_before_correction_w_m2: number | null;
+  mae_after_correction_w_m2: number | null;
+  mean_forecast_error_w_m2: number | null;
+  mean_forecast_uncertainty_w_m2: number | null;
+  max_forecast_uncertainty_w_m2: number | null;
   evaluation_basis: string;
   correction_applied: boolean;
   correction_reason: string;
@@ -140,8 +140,6 @@ type OptimizeResponse = {
   comparison: Recommendation[];
   dispatch: DispatchPoint[];
 };
-
-type PrefetchStatus = "idle" | "warming" | "ready" | "unavailable";
 
 const defaultScenario: ScenarioInput = {
   location_name: "Brasilia, Brazil",
@@ -228,6 +226,10 @@ function formatPercent(value: number, digits = 0) {
     maximumFractionDigits: digits,
     minimumFractionDigits: digits,
   }).format(value);
+}
+
+function formatOptionalIrradiance(value: number | null, digits = 1) {
+  return value === null ? "Unavailable" : `${formatNumber(value, digits)} W/m²`;
 }
 
 function localHour(timestamp: string) {
@@ -440,6 +442,42 @@ function FormSection({ title, children }: { title: string; children: ReactNode }
   );
 }
 
+function DisclosureSection({
+  title,
+  summary,
+  children,
+  defaultOpen = false,
+}: {
+  title: string;
+  summary: string;
+  children: ReactNode;
+  defaultOpen?: boolean;
+}) {
+  return (
+    <details
+      className="group rounded-md border border-slate-200 bg-slate-50/70"
+      open={defaultOpen}
+    >
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5">
+        <span>
+          <span className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-600">
+            {title}
+          </span>
+          <span className="mt-0.5 block text-[11px] leading-relaxed text-slate-500">
+            {summary}
+          </span>
+        </span>
+        <span className="text-lg leading-none text-slate-400 transition group-open:rotate-45">
+          +
+        </span>
+      </summary>
+      <div className="grid gap-2.5 border-t border-slate-200 bg-white p-3">
+        {children}
+      </div>
+    </details>
+  );
+}
+
 function LegendChip({ color, label }: { color: string; label: string }) {
   return (
     <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-600">
@@ -555,78 +593,6 @@ export default function Home() {
   const [data, setData] = useState<OptimizeResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [prefetchStatus, setPrefetchStatus] = useState<PrefetchStatus>("idle");
-  const [prefetchMessage, setPrefetchMessage] = useState("Annual weather data not requested yet.");
-  const locationIsValid = Number.isFinite(scenario.latitude) && Number.isFinite(scenario.longitude);
-  const displayedPrefetchStatus = locationIsValid ? prefetchStatus : "idle";
-  const displayedPrefetchMessage = locationIsValid
-    ? prefetchMessage
-    : "Enter a valid location to warm annual weather data.";
-
-  useEffect(() => {
-    if (!locationIsValid) {
-      return;
-    }
-
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(async () => {
-      setPrefetchStatus("warming");
-      setPrefetchMessage("Warming annual weather data cache...");
-
-      try {
-        const response = await fetch(`${API_URL}/prefetch-annual-economics`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            scenario: {
-              ...defaultScenario,
-              location_name: scenario.location_name,
-              latitude: scenario.latitude,
-              longitude: scenario.longitude,
-              timezone: scenario.timezone,
-            },
-          }),
-          signal: controller.signal,
-        });
-
-        if (!response.ok) {
-          throw new Error(`API returned ${response.status}`);
-        }
-
-        const payload = (await response.json()) as {
-          status: string;
-          years: number[];
-          note: string;
-        };
-        if (payload.status === "ready" && payload.years.length > 0) {
-          setPrefetchStatus("ready");
-          setPrefetchMessage(
-            `Annual weather cache ready: ${payload.years[0]}-${payload.years[payload.years.length - 1]}.`,
-          );
-        } else {
-          setPrefetchStatus("unavailable");
-          setPrefetchMessage(payload.note);
-        }
-      } catch (caught) {
-        if (caught instanceof DOMException && caught.name === "AbortError") {
-          return;
-        }
-        setPrefetchStatus("unavailable");
-        setPrefetchMessage("Annual weather cache will be attempted during optimisation.");
-      }
-    }, 700);
-
-    return () => {
-      controller.abort();
-      window.clearTimeout(timeoutId);
-    };
-  }, [
-    scenario.latitude,
-    locationIsValid,
-    scenario.location_name,
-    scenario.longitude,
-    scenario.timezone,
-  ]);
 
   const chartData = useMemo(
     () =>
@@ -686,7 +652,8 @@ export default function Home() {
       });
 
       if (!response.ok) {
-        throw new Error(`API returned ${response.status}`);
+        const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
+        throw new Error(payload?.detail ?? `API returned ${response.status}`);
       }
 
       setData((await response.json()) as OptimizeResponse);
@@ -815,17 +782,7 @@ export default function Home() {
                   </div>
                 </div>
                 <p className="text-[11px] leading-relaxed text-slate-500">
-                  <span
-                    aria-hidden
-                    className={`mr-1.5 inline-block h-1.5 w-1.5 rounded-full ${
-                      displayedPrefetchStatus === "ready"
-                        ? "bg-green-600"
-                        : displayedPrefetchStatus === "warming"
-                          ? "bg-amber-500"
-                          : "bg-slate-300"
-                    }`}
-                  />
-                  {displayedPrefetchMessage}
+                  Annual economics load from local cache or NASA POWER when optimisation runs.
                 </p>
               </FormSection>
 
@@ -959,7 +916,10 @@ export default function Home() {
                 />
               </FormSection>
 
-              <FormSection title="Costs &amp; tariffs">
+              <DisclosureSection
+                title="Economics &amp; tariffs"
+                summary="Use defaults for a quick run, then tune costs when comparing cases."
+              >
                 <NumberField
                   label="Battery cost"
                   value={scenario.battery_cost_per_kwh}
@@ -1014,7 +974,7 @@ export default function Home() {
                     }))
                   }
                 />
-              </FormSection>
+              </DisclosureSection>
 
               <button
                 type="submit"
@@ -1044,68 +1004,132 @@ export default function Home() {
           </aside>
 
           <section className="grid min-w-0 gap-6">
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <MetricCard
-                label="Recommended size"
-                value={recommendation ? `${recommendation.battery_size_kwh}` : "—"}
-                unit={recommendation ? "kWh" : undefined}
-                help="Battery size selected from the discrete candidate set using savings, payback, and backup resilience."
-                hint={
-                  recommendation
-                    ? recommendation.passes_payback_threshold
-                      ? "Inside 10-year payback"
-                      : "Outside 10-year payback"
-                    : "Run optimisation to populate"
-                }
-              />
-              <MetricCard
-                label="P50 annual savings"
-                help="Median annual savings across historical weather years when multi-year NASA data is available."
-                value={
-                  recommendation
-                    ? formatCurrency(
-                        recommendation.annualised_savings_estimate,
-                        scenario.currency,
-                      )
-                    : "—"
-                }
-                hint={
-                  recommendation?.p90_annual_savings !== null &&
-                  recommendation?.p90_annual_savings !== undefined
-                    ? `P90: ${formatCurrency(recommendation.p90_annual_savings, scenario.currency)}`
-                    : recommendation
-                      ? "Historical-year model when available"
-                      : ""
-                }
-              >
-                <AnnualSavingsBand
-                  recommendation={recommendation}
-                  currency={scenario.currency}
-                />
-              </MetricCard>
-              <MetricCard
-                label="Payback"
-                help="Battery cost divided by estimated annual savings. Lower is better."
-                value={
-                  recommendation?.payback_years
-                    ? formatNumber(recommendation.payback_years, 1)
-                    : "—"
-                }
-                unit={recommendation?.payback_years ? "years" : undefined}
-                hint="Threshold: 10 years"
-              />
-              <MetricCard
-                label="Critical-load backup"
-                help="Estimated hours the final battery state can serve the configured critical load."
-                value={
-                  recommendation
-                    ? formatNumber(recommendation.outage_backup_hours, 1)
-                    : "—"
-                }
-                unit={recommendation ? "hours" : undefined}
-                hint={`At ${scenario.critical_load_kw} kW critical load`}
-              />
-            </div>
+            <section className="rounded-md border border-slate-200 bg-white">
+              <header className="border-b border-slate-200 px-5 py-3">
+                <h2 className="text-sm font-semibold text-slate-900">
+                  Quick recommendation
+                </h2>
+                <p className="text-xs text-slate-500">
+                  The simple answer first; detailed economics and diagnostics stay below.
+                </p>
+              </header>
+              <div className="grid gap-4 p-5 xl:grid-cols-[minmax(0,1fr)_320px]">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <MetricCard
+                    label="Recommended size"
+                    value={recommendation ? `${recommendation.battery_size_kwh}` : "—"}
+                    unit={recommendation ? "kWh" : undefined}
+                    help="Battery size selected from the discrete candidate set using savings, payback, and backup resilience."
+                    hint={
+                      recommendation
+                        ? recommendation.passes_payback_threshold
+                          ? "Inside 10-year payback"
+                          : "Outside 10-year payback"
+                        : "Run optimisation to populate"
+                    }
+                  />
+                  <MetricCard
+                    label="P50 annual savings"
+                    help="Median annual savings across historical weather years when multi-year NASA data is available."
+                    value={
+                      recommendation
+                        ? formatCurrency(
+                            recommendation.annualised_savings_estimate,
+                            scenario.currency,
+                          )
+                        : "—"
+                    }
+                    hint={
+                      recommendation?.p90_annual_savings !== null &&
+                      recommendation?.p90_annual_savings !== undefined
+                        ? `P90: ${formatCurrency(recommendation.p90_annual_savings, scenario.currency)}`
+                        : recommendation
+                          ? "Historical-year model when available"
+                          : ""
+                    }
+                  >
+                    <AnnualSavingsBand
+                      recommendation={recommendation}
+                      currency={scenario.currency}
+                    />
+                  </MetricCard>
+                  <MetricCard
+                    label="Payback"
+                    help="Battery cost divided by estimated annual savings. Lower is better."
+                    value={
+                      recommendation?.payback_years
+                        ? formatNumber(recommendation.payback_years, 1)
+                        : "—"
+                    }
+                    unit={recommendation?.payback_years ? "years" : undefined}
+                    hint="Threshold: 10 years"
+                  />
+                  <MetricCard
+                    label="Critical-load backup"
+                    help="Estimated hours the final battery state can serve the configured critical load."
+                    value={
+                      recommendation
+                        ? formatNumber(recommendation.outage_backup_hours, 1)
+                        : "—"
+                    }
+                    unit={recommendation ? "hours" : undefined}
+                    hint={`At ${scenario.critical_load_kw} kW critical load`}
+                  />
+                </div>
+
+                <section className="overflow-hidden rounded-md border border-slate-200 bg-slate-50">
+                  <header className="border-b border-slate-200 bg-white px-4 py-3">
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      Before vs after
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      Current 24 h forecast window
+                    </p>
+                  </header>
+                  <dl className="grid divide-y divide-slate-200">
+                    <div className="grid grid-cols-[1fr_auto] items-baseline gap-4 px-4 py-3">
+                      <dt className="text-[11px] uppercase tracking-[0.1em] text-slate-500">
+                        Without battery
+                      </dt>
+                      <dd className="text-lg font-semibold tabular-nums text-slate-900">
+                        {recommendation
+                          ? formatCurrency(
+                              recommendation.daily_cost_without_battery,
+                              scenario.currency,
+                            )
+                          : "—"}
+                      </dd>
+                    </div>
+                    <div className="grid grid-cols-[1fr_auto] items-baseline gap-4 px-4 py-3">
+                      <dt className="text-[11px] uppercase tracking-[0.1em] text-slate-500">
+                        With battery
+                      </dt>
+                      <dd className="text-lg font-semibold tabular-nums text-slate-900">
+                        {recommendation
+                          ? formatCurrency(
+                              recommendation.daily_cost_with_battery,
+                              scenario.currency,
+                            )
+                          : "—"}
+                      </dd>
+                    </div>
+                    <div className="grid grid-cols-[1fr_auto] items-baseline gap-4 bg-white px-4 py-3">
+                      <dt className="text-[11px] font-medium uppercase tracking-[0.1em] text-slate-700">
+                        24 h saving
+                      </dt>
+                      <dd className="text-lg font-semibold tabular-nums text-slate-900">
+                        {recommendation
+                          ? formatCurrency(
+                              recommendation.representative_24h_savings,
+                              scenario.currency,
+                            )
+                          : "—"}
+                      </dd>
+                    </div>
+                  </dl>
+                </section>
+              </div>
+            </section>
 
             <section className="min-w-0 overflow-hidden rounded-md border border-slate-200 bg-white">
               <header className="flex flex-col gap-3 border-b border-slate-200 px-5 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1126,7 +1150,7 @@ export default function Home() {
               </header>
               <div className="h-[340px] min-w-0 px-2 pb-3 pt-4 sm:h-[460px] sm:px-4">
                 {chartData.length ? (
-                  <ResponsiveContainer width="100%" height="100%">
+                  <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
                     <ComposedChart
                       data={chartData}
                       margin={{ left: -8, right: 8, top: 4, bottom: 0 }}
@@ -1234,11 +1258,11 @@ export default function Home() {
               </div>
             </section>
 
-            <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
+            <div className="grid gap-6">
               <section className="rounded-md border border-slate-200 bg-white">
                 <header className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
                   <h2 className="text-sm font-semibold text-slate-900">
-                    Battery sizes
+                    Economics sweep
                   </h2>
                   <span className="text-[11px] uppercase tracking-wide text-slate-500">
                     Sweep results
@@ -1330,55 +1354,6 @@ export default function Home() {
                     </tbody>
                   </table>
                 </div>
-              </section>
-
-              <section className="rounded-md border border-slate-200 bg-white">
-                <header className="border-b border-slate-200 px-5 py-3">
-                  <h2 className="text-sm font-semibold text-slate-900">
-                    Daily cost · before vs after
-                  </h2>
-                </header>
-                <dl className="grid divide-y divide-slate-200">
-                  <div className="grid grid-cols-[1fr_auto] items-baseline gap-4 px-5 py-3">
-                    <dt className="text-[11px] uppercase tracking-[0.1em] text-slate-500">
-                      Without battery
-                    </dt>
-                    <dd className="text-lg font-semibold tabular-nums text-slate-900">
-                      {recommendation
-                        ? formatCurrency(
-                            recommendation.daily_cost_without_battery,
-                            scenario.currency,
-                          )
-                        : "—"}
-                    </dd>
-                  </div>
-                  <div className="grid grid-cols-[1fr_auto] items-baseline gap-4 px-5 py-3">
-                    <dt className="text-[11px] uppercase tracking-[0.1em] text-slate-500">
-                      With recommended battery
-                    </dt>
-                    <dd className="text-lg font-semibold tabular-nums text-slate-900">
-                      {recommendation
-                        ? formatCurrency(
-                            recommendation.daily_cost_with_battery,
-                            scenario.currency,
-                          )
-                        : "—"}
-                    </dd>
-                  </div>
-                  <div className="grid grid-cols-[1fr_auto] items-baseline gap-4 bg-slate-50 px-5 py-3">
-                    <dt className="text-[11px] font-medium uppercase tracking-[0.1em] text-slate-700">
-                      Avg daily saving
-                    </dt>
-                    <dd className="text-lg font-semibold tabular-nums text-slate-900">
-                      {recommendation
-                        ? formatCurrency(
-                            recommendation.representative_24h_savings,
-                            scenario.currency,
-                          )
-                        : "—"}
-                    </dd>
-                  </div>
-                </dl>
                 {data?.economics_note ? (
                   <p className="border-t border-slate-200 px-5 py-3 text-xs leading-relaxed text-slate-500">
                     {data.economics_note}
@@ -1419,22 +1394,26 @@ export default function Home() {
                   <p>Backup hours are capped at 8 h when scoring.</p>
                   <p>ML estimates forecast uncertainty; dispatch uses the raw forecast.</p>
                   <p>
-                    Annual savings use NASA POWER history when available, otherwise
-                    the representative-window fallback.
+                    Annual savings use real NASA POWER historical weather years.
                   </p>
                 </div>
               </div>
             </section>
 
-            <section className="rounded-md border border-slate-200 bg-white">
-              <header className="border-b border-slate-200 px-5 py-3">
-                <h2 className="text-sm font-semibold text-slate-900">
-                  Model diagnostics
-                </h2>
-                <p className="text-xs text-slate-500">
-                  Read-only checks from the annual simulation and forecast-error model.
-                </p>
-              </header>
+            <details className="group rounded-md border border-slate-200 bg-white">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-4 border-b border-slate-200 px-5 py-3">
+                <span>
+                  <span className="block text-sm font-semibold text-slate-900">
+                    Advanced diagnostics
+                  </span>
+                  <span className="mt-0.5 block text-xs text-slate-500">
+                    Annual simulation checks, forecast uncertainty status, and model notes.
+                  </span>
+                </span>
+                <span className="text-xl leading-none text-slate-400 transition group-open:rotate-45">
+                  +
+                </span>
+              </summary>
               {data ? (
                 <div className="grid gap-5 px-5 py-4 xl:grid-cols-2">
                   <div className="grid gap-3">
@@ -1518,32 +1497,37 @@ export default function Home() {
                       />
                       <DiagnosticItem
                         label="Training rows"
-                        value={formatNumber(
-                          data.model_diagnostics.ml.training_rows,
-                          0,
-                        )}
+                        value={
+                          data.model_diagnostics.ml.training_rows > 0
+                            ? formatNumber(data.model_diagnostics.ml.training_rows, 0)
+                            : "Unavailable"
+                        }
                         hint={data.model_diagnostics.ml.training_period}
                       />
                       <DiagnosticItem
                         label="Raw forecast MAE"
                         help="Mean absolute irradiance forecast error on the validation holdout before any model estimate."
-                        value={`${formatNumber(data.model_diagnostics.ml.mae_before_correction_w_m2, 1)} W/m²`}
+                        value={formatOptionalIrradiance(data.model_diagnostics.ml.mae_before_correction_w_m2, 1)}
                       />
                       <DiagnosticItem
                         label="Model residual MAE"
                         help="Validation error after estimating forecast error. This is reported for trust, not used to change dispatch."
-                        value={`${formatNumber(data.model_diagnostics.ml.mae_after_correction_w_m2, 1)} W/m²`}
+                        value={formatOptionalIrradiance(data.model_diagnostics.ml.mae_after_correction_w_m2, 1)}
                         hint={data.model_diagnostics.ml.evaluation_basis}
                       />
                       <DiagnosticItem
                         label="Mean forecast error"
-                        value={`${formatNumber(data.model_diagnostics.ml.mean_forecast_error_w_m2, 1)} W/m²`}
+                        value={formatOptionalIrradiance(data.model_diagnostics.ml.mean_forecast_error_w_m2, 1)}
                       />
                       <DiagnosticItem
                         label="Mean uncertainty"
                         help="Average absolute forecast-error estimate over daylight hours in the next forecast window."
-                        value={`${formatNumber(data.model_diagnostics.ml.mean_forecast_uncertainty_w_m2, 1)} W/m²`}
-                        hint={`Max ${formatNumber(data.model_diagnostics.ml.max_forecast_uncertainty_w_m2, 1)} W/m²`}
+                        value={formatOptionalIrradiance(data.model_diagnostics.ml.mean_forecast_uncertainty_w_m2, 1)}
+                        hint={
+                          data.model_diagnostics.ml.max_forecast_uncertainty_w_m2 === null
+                            ? "Max unavailable"
+                            : `Max ${formatNumber(data.model_diagnostics.ml.max_forecast_uncertainty_w_m2, 1)} W/m²`
+                        }
                       />
                       <DiagnosticItem
                         label="Dispatch impact"
@@ -1562,7 +1546,7 @@ export default function Home() {
                   Run optimisation to populate diagnostics.
                 </div>
               )}
-            </section>
+            </details>
 
             <section className="rounded-md border border-slate-200 bg-white">
               <header className="border-b border-slate-200 px-5 py-3">
@@ -1582,7 +1566,7 @@ export default function Home() {
                         ? `NASA POWER ${data.assumptions.annual_economics_years[0]}-${data.assumptions.annual_economics_years[data.assumptions.annual_economics_years.length - 1]} with P50/P90 savings`
                         : data.assumptions.annual_economics_year
                         ? `NASA POWER ${data.assumptions.annual_economics_year}`
-                        : "Representative 24 h forecast window fallback"
+                        : "NASA POWER historical economics unavailable"
                     }
                   />
                   <AssumptionItem

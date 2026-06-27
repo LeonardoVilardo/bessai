@@ -5,22 +5,18 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from packages.engine.core import (
-    DEFAULT_HISTORICAL_YEAR,
     DEFAULT_HISTORICAL_YEARS,
     Scenario,
     calculate_metrics,
     extract_clock_hours,
-    fallback_clear_sky_forecast,
     fetch_open_meteo_forecast,
     fetch_nasa_power_hourly_irradiance,
     generate_load_profile,
-    optimize_battery_size,
-    optimize_battery_size_with_annual_history,
     optimize_battery_size_with_multi_year_history,
     run_dispatch_case,
     simulate_battery_dispatch,
@@ -117,7 +113,30 @@ def load_forecast(scenario: Scenario) -> tuple[dict[str, list[Any]], str]:
     try:
         return fetch_open_meteo_forecast(scenario), "Open-Meteo"
     except Exception as exc:
-        return fallback_clear_sky_forecast(), f"fallback sample data ({exc})"
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Open-Meteo forecast data is unavailable, so dispatch simulation cannot run "
+                f"with real forecast data. Reason: {exc}"
+            ),
+        ) from exc
+
+
+def nullable_round(value: Any, digits: int = 2) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), digits)
+
+
+def fetch_available_historical_years(scenario: Scenario) -> tuple[list[dict[str, list[Any]]], list[int]]:
+    historical_years: list[dict[str, list[Any]]] = []
+    failed_years: list[int] = []
+    for year in DEFAULT_HISTORICAL_YEARS:
+        try:
+            historical_years.append(fetch_nasa_power_hourly_irradiance(scenario, year))
+        except Exception:
+            failed_years.append(int(year))
+    return historical_years, failed_years
 
 
 def dispatch_series(
@@ -210,11 +229,11 @@ def ml_diagnostics(ml_forecast: dict[str, Any]) -> dict[str, float | int | str]:
         "model_source": ml_forecast["training_source"],
         "training_rows": ml_forecast["training_rows"],
         "training_period": ml_forecast["training_period"],
-        "mae_before_correction_w_m2": round(float(ml_forecast["mae_before_correction_w_m2"]), 2),
-        "mae_after_correction_w_m2": round(float(ml_forecast["mae_after_correction_w_m2"]), 2),
-        "mean_forecast_error_w_m2": round(float(ml_forecast["mean_forecast_error_w_m2"]), 2),
-        "mean_forecast_uncertainty_w_m2": round(float(ml_forecast["mean_forecast_uncertainty_w_m2"]), 2),
-        "max_forecast_uncertainty_w_m2": round(float(ml_forecast["max_forecast_uncertainty_w_m2"]), 2),
+        "mae_before_correction_w_m2": nullable_round(ml_forecast["mae_before_correction_w_m2"]),
+        "mae_after_correction_w_m2": nullable_round(ml_forecast["mae_after_correction_w_m2"]),
+        "mean_forecast_error_w_m2": nullable_round(ml_forecast["mean_forecast_error_w_m2"]),
+        "mean_forecast_uncertainty_w_m2": nullable_round(ml_forecast["mean_forecast_uncertainty_w_m2"]),
+        "max_forecast_uncertainty_w_m2": nullable_round(ml_forecast["max_forecast_uncertainty_w_m2"]),
         "evaluation_basis": ml_forecast["evaluation_basis"],
         "correction_applied": bool(ml_forecast["ml_correction_applied"]),
         "correction_reason": ml_forecast["ml_correction_reason"],
@@ -266,12 +285,8 @@ def prefetch_annual_economics(
     fetched_years: list[int] = []
     failed_years: list[int] = []
 
-    for year in DEFAULT_HISTORICAL_YEARS:
-        try:
-            fetch_nasa_power_hourly_irradiance(scenario, year)
-            fetched_years.append(int(year))
-        except Exception:
-            failed_years.append(int(year))
+    historical_years, failed_years = fetch_available_historical_years(scenario)
+    fetched_years = [int(year["year"]) for year in historical_years]
 
     return {
         "status": "ready" if not failed_years else "partial",
@@ -279,9 +294,9 @@ def prefetch_annual_economics(
         "years": fetched_years,
         "failed_years": failed_years,
         "note": (
-            "Multi-year annual economics cache is ready for this location."
+            "Historical annual economics cache is ready for this location."
             if not failed_years
-            else "Some historical years could not be cached; optimisation will use its normal fallback path."
+            else "Some historical years could not be cached; optimisation will use the real years that are available."
         ),
     }
 
@@ -289,15 +304,27 @@ def prefetch_annual_economics(
 @app.post("/optimize")
 def optimize(request: OptimizeRequest = Body(default_factory=OptimizeRequest)) -> dict[str, Any]:
     scenario = build_scenario(request.scenario)
-    ml_forecast = get_corrected_shortwave_forecast(
-        ForecastScenario(
-            location_name=scenario.location_name,
-            latitude=scenario.latitude,
-            longitude=scenario.longitude,
-            timezone=scenario.timezone,
+    try:
+        ml_forecast = get_corrected_shortwave_forecast(
+            ForecastScenario(
+                location_name=scenario.location_name,
+                latitude=scenario.latitude,
+                longitude=scenario.longitude,
+                timezone=scenario.timezone,
+            )
         )
-    )
-    forecast_source = f"{ml_forecast['forecast_source']} raw forecast + ML uncertainty estimate"
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Open-Meteo forecast data is unavailable, so optimization cannot run "
+                f"with real dispatch forecast data. Reason: {exc}"
+            ),
+        ) from exc
+    if ml_forecast["training_source"] == "unavailable":
+        forecast_source = f"{ml_forecast['forecast_source']} raw forecast (ML uncertainty unavailable)"
+    else:
+        forecast_source = f"{ml_forecast['forecast_source']} raw forecast + ML uncertainty estimate"
     times = list(ml_forecast["time"])
     shortwave = np.array(ml_forecast["selected_shortwave_radiation_w_m2"], dtype=float)
     clock_hours = extract_clock_hours(times)
@@ -309,49 +336,34 @@ def optimize(request: OptimizeRequest = Body(default_factory=OptimizeRequest)) -
     )
     pv_generation = simulate_pv_generation(shortwave, scenario)
 
-    economics_source = f"Representative current 24h forecast window annualised by {365} days"
-    economics_note = "NASA POWER annual historical irradiance unavailable; using representative-window fallback."
+    economics_source = "NASA POWER hourly historical irradiance unavailable"
+    economics_note = "NASA POWER annual historical irradiance unavailable; recommendation not calculated."
     annual_economics_year: int | None = None
     annual_economics_years: list[int] = []
-    diagnostics_annualization_factor = float(365)
-    try:
-        historical_years = [
-            fetch_nasa_power_hourly_irradiance(scenario, year)
-            for year in DEFAULT_HISTORICAL_YEARS
-        ]
-        cases, recommended = optimize_battery_size_with_multi_year_history(scenario, historical_years)
-        annual_economics_years = [int(year["year"]) for year in historical_years]
-        economics_source = (
-            f"NASA POWER hourly historical irradiance, "
-            f"{annual_economics_years[0]}-{annual_economics_years[-1]}"
+    diagnostics_annualization_factor = 1.0
+    historical_years, failed_historical_years = fetch_available_historical_years(scenario)
+    if not historical_years:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "NASA POWER historical irradiance is unavailable for the selected location, "
+                "so annual savings and payback cannot be calculated from real historical data."
+            ),
         )
-        economics_note = (
-            "Annual savings and payback use multi-year NASA POWER hourly irradiance. "
-            "Recommendation uses P50 annual savings; P90 is the 10th-percentile conservative weather-year estimate. "
-            "Dispatch chart uses next-24h Open-Meteo forecast."
-        )
-        diagnostics_annualization_factor = 1.0
-    except Exception as multi_year_exc:
-        try:
-            historical = fetch_nasa_power_hourly_irradiance(scenario, DEFAULT_HISTORICAL_YEAR)
-            historical_shortwave = np.array(historical["shortwave_radiation_w_m2"], dtype=float)
-            historical_clock_hours = extract_clock_hours(list(historical["time"]))
-            cases, recommended = optimize_battery_size_with_annual_history(
-                scenario,
-                historical_shortwave,
-                historical_clock_hours,
-            )
-            economics_source = f"NASA POWER hourly historical irradiance, {historical['year']}"
-            economics_note = (
-                "Multi-year NASA POWER economics unavailable; using single historical year. "
-                f"Fallback reason: {multi_year_exc}"
-            )
-            annual_economics_year = int(historical["year"])
-            annual_economics_years = [annual_economics_year]
-            diagnostics_annualization_factor = 1.0
-        except Exception as exc:
-            cases, recommended = optimize_battery_size(scenario, pv_generation, load, clock_hours)
-            economics_note = f"{economics_note} Fallback reason: {exc}"
+
+    cases, recommended = optimize_battery_size_with_multi_year_history(scenario, historical_years)
+    annual_economics_years = [int(year["year"]) for year in historical_years]
+    economics_source = (
+        f"NASA POWER hourly historical irradiance, "
+        f"{annual_economics_years[0]}-{annual_economics_years[-1]}"
+    )
+    economics_note = (
+        "Annual savings and payback use real NASA POWER hourly historical irradiance. "
+        "Recommendation uses P50 annual savings; P90 is the 10th-percentile conservative weather-year estimate. "
+        "Dispatch chart uses next-24h Open-Meteo forecast."
+    )
+    if failed_historical_years:
+        economics_note += f" Missing historical years: {failed_historical_years}."
 
     recommended_size = recommended["battery_size_kwh"]
     recommended_case = run_dispatch_case(scenario, recommended_size, pv_generation, load, clock_hours)

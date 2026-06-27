@@ -27,12 +27,12 @@ The MVP should use this loop as its default operating model, while keeping the i
 1. Fetch the next-24h solar forecast from the Open-Meteo Forecast API.
    - Requested hourly variables: `shortwave_radiation`, `cloud_cover`, and `temperature_2m`.
    - `shortwave_radiation` is the raw irradiance input for tomorrow's dispatch chart.
-   - If the API fails, use the deterministic fallback forecast so the demo still runs.
+   - If the API fails, stop the simulation and show a clear error. Do not fabricate weather data.
 2. Estimate forecast error using a scikit-learn regression model.
    - Current model class: `GradientBoostingRegressor`.
    - Target: `actual_solar - forecast_solar`.
    - Real training source when available: Open-Meteo Previous Runs API matched against Open-Meteo Historical Weather API.
-   - Fallback training source: synthetic demo forecast-error rows, clearly labeled in diagnostics.
+   - If real training rows are unavailable or invalid, mark ML uncertainty as unavailable. Do not train on synthetic rows.
 3. Convert predicted forecast error into a forecast-uncertainty diagnostic.
    - Current displayed uncertainty: absolute predicted forecast error in W/m2.
    - The MVP does not use ML to overwrite the dispatch forecast.
@@ -49,7 +49,7 @@ The MVP should use this loop as its default operating model, while keeping the i
    - Backup hours at the configured critical load.
 7. Compute annual economics using historical irradiance.
    - Preferred source: NASA POWER hourly `ALLSKY_SFC_SW_DWN`.
-   - Current MVP years: `2016-2025`.
+   - Current MVP years: `2001-2025`.
    - Each year is simulated independently.
    - The app reports average, P50, and P90 annual savings.
 8. Repeat the annual simulation for multiple battery sizes.
@@ -59,7 +59,7 @@ The MVP should use this loop as its default operating model, while keeping the i
    - Only payback-qualified batteries are recommended when any option has payback <= 10 years.
 10. Display recommendation, dispatch plan, diagnostics, and assumptions.
     - Show what data source was used.
-    - Show whether annual economics used multi-year NASA data, a single year, or fallback annualization.
+    - Show which NASA historical years were used and whether any years failed to load.
     - Show ML as an uncertainty diagnostic, not as a hidden financial or dispatch decision.
 
 ## Target Users
@@ -215,9 +215,8 @@ Optional MVP subsection or tab if the dashboard becomes crowded.
 - NASA POWER Hourly API:
   - Used for annual economics.
   - Variable: `ALLSKY_SFC_SW_DWN`.
-  - Current years: `2016-2025`.
-- Synthetic forecast-error training data:
-  - Used only as a fallback when real matched forecast-error rows are unavailable or invalid.
+  - Current years: `2001-2025`.
+  - Cached locally under `outputs/cache/`.
 
 ### Optional Later
 
@@ -254,18 +253,18 @@ bessai-plan.md
 - Forecast uncertainty is reported to the user but does not yet change reserve or dispatch.
 - Battery state of charge is bounded between 0 and capacity.
 - Load profile can be generated from average daily consumption with a simple morning/evening shape.
-- Annual savings should use NASA POWER hourly historical irradiance for `2016-2025` when available.
+- Annual savings should use NASA POWER hourly historical irradiance for `2001-2025` when available.
 - Historical annual economics simulate each year independently, then report average, P50, and P90 annual savings.
-- If NASA POWER multi-year data fails, fall back to a single historical year, currently `2024`.
-- If historical data fails completely, fall back to annualizing the representative 24h forecast window.
+- If some NASA POWER years fail, use the real years that loaded and report the missing years.
+- If no NASA POWER years load, stop annual economics and show a clear error.
 - NASA POWER historical data is not a forecast. It is used to estimate likely annual economics from historical weather years.
-- Ten historical years are acceptable for the MVP demo, but a production-grade or finance-grade estimate should support longer climatology windows, such as 20-30 years when available.
+- The current 25-year range is acceptable for the MVP. If a longer valid hourly range becomes available, support up to a practical cap such as 50 years.
 - Payback = installed battery cost / annual savings.
 - Outage backup hours = usable reserved energy / critical load.
 - Financial results must come from deterministic simulation, not ML.
 - Currency should be configurable, with BRL as the default for the Brasilia demo.
 - Peak tariff should default to 18:00 to 21:00 for the MVP.
-- Forecast data should use live Open-Meteo when available and cached or sample fallback data when live data is unavailable.
+- Forecast data should use live Open-Meteo. If it is unavailable, the app should fail clearly instead of using fake weather.
 
 ## Optimization Approach
 
@@ -325,10 +324,10 @@ Then:
 - deterministic simulation calculates savings, payback, and backup hours
 - optimization selects a battery size from deterministic simulation outputs
 
-Suggested model note if synthetic forecast-error data is used:
+Suggested model note if real forecast-error training data is unavailable:
 
 ```text
-Forecast-error model trained on synthetic demo data. Designed to be replaced with archived forecast data.
+Forecast-error model unavailable because real matched forecast-error training data could not be loaded or validated.
 ```
 
 This note should be visible but not alarming. It belongs in a small model note, not as a large warning.
@@ -345,9 +344,9 @@ Current implemented model:
 
 - Library: `scikit-learn`.
 - Model class: `GradientBoostingRegressor`.
-- Training window: Open-Meteo previous-run data for the recent previous-day forecast window available to the API, currently configured as the past 90 days.
+- Training window: Open-Meteo previous-run data from `2024-01-01` through the current date where available.
 - Validation: last 20% holdout rows, reported as raw forecast MAE and model residual MAE.
-- Guardrail: if real rows are missing or have no meaningful error, use synthetic fallback rows and label that clearly.
+- Guardrail: if real rows are missing or have no meaningful error, mark ML uncertainty unavailable and keep dispatch on raw Open-Meteo forecast.
 
 Implemented inputs:
 
@@ -369,15 +368,10 @@ The MVP should train on real matched forecast-error rows when practical:
 
 - Preferred practical source: Open-Meteo Previous Runs API for archived previous-day forecasts.
 - Current actual/reanalysis comparison source: Open-Meteo Historical Weather API.
-- Cache downloaded rows locally so repeated demos do not hammer APIs.
+- Cache downloaded rows locally with the date window in the filename so repeated demos do not hammer APIs or silently reuse stale rolling-window data.
 - Validate that matched rows contain measurable forecast error; if they do not, fall back instead of pretending the model learned useful error.
 
-If real forecast-error data is not immediately available, the MVP should use a clean synthetic pipeline:
-
-- Generate plausible forecast errors.
-- Train a regression model.
-- Label it clearly but calmly as synthetic demo training.
-- Keep the interface ready for real archived forecast data later.
+If real forecast-error data is not available, the MVP should not train a synthetic model. It should keep the interface ready for real archived forecast data later and clearly show that ML diagnostics are unavailable.
 
 The ML model is informational in the MVP. It must not invent annual savings or payback, and it should not override the dispatch forecast until validation is strong enough to justify that behavior.
 
@@ -426,10 +420,10 @@ Fetches or loads cached NASA POWER hourly irradiance for the selected location a
 Current years:
 
 ```text
-2016-2025
+2001-2025
 ```
 
-This endpoint exists so the dashboard can warm the annual-economics cache while the user is still editing other inputs.
+This endpoint exists so a developer or future explicit UI action can warm the annual-economics cache. The dashboard should not automatically prefetch all historical data on page load.
 
 ## Default Demo Scenario
 
@@ -453,10 +447,10 @@ This endpoint exists so the dashboard can warm the annual-economics cache while 
 - Battery sizes: common discrete sizes first: 0, 5, 10, 13.5, 15, 20, and 30 kWh.
 - Currency: configurable, with BRL as the Brasilia demo default.
 - Peak tariff window: 18:00 to 21:00.
-- Annual economics: simulate NASA POWER hourly historical irradiance for `2016-2025` when available.
-- Historical economics fallback order: multi-year NASA POWER, single-year NASA POWER `2024`, then representative 24h annualization.
-- Short-term dispatch forecast: live Open-Meteo Forecast API when available, with cached or sample fallback data so the demo always works.
-- ML transparency: show the training source and uncertainty estimate calmly; mention synthetic training data in a small model note if fallback data is used.
+- Annual economics: simulate NASA POWER hourly historical irradiance for `2001-2025` when available.
+- Historical economics fallback: use the real NASA years that load; if none load, show an error.
+- Short-term dispatch forecast: live Open-Meteo Forecast API. If unavailable, show an error.
+- ML transparency: show the training source and uncertainty estimate calmly; if real training data is unavailable, say so directly.
 - Tone: installer/analyst-friendly, but still understandable to a homeowner.
 
 ## MVP Build Order
@@ -464,7 +458,7 @@ This endpoint exists so the dashboard can warm the annual-economics cache while 
 1. Planning file.
 2. Core Python simulation that runs the Brasilia default scenario.
 3. Optimization over common discrete battery sizes.
-4. Forecast provider wrapper with a deterministic fallback.
+4. Forecast provider wrapper with clear API failure handling.
 5. FastAPI app with `/health`, `/simulate`, and `/optimize`.
 6. Next.js dashboard with input form, results cards, dispatch chart, and explanation.
 7. ML forecast-error uncertainty pipeline.
@@ -480,10 +474,10 @@ This endpoint exists so the dashboard can warm the annual-economics cache while 
 - [x] Add optimization over common discrete battery sizes.
 - [x] Add blended scoring for savings, resilience, and payback.
 - [x] Add forecast provider wrapper.
-- [x] Add forecast-error ML pipeline with real Open-Meteo previous-run training rows and synthetic fallback.
+- [x] Add forecast-error ML pipeline with real Open-Meteo previous-run training rows and unavailable-state handling.
 - [x] Connect ML forecast-error diagnostics to deterministic engine demo.
 - [x] Add FastAPI endpoints.
-- [x] Add NASA POWER full-year historical economics fallback path.
+- [x] Add NASA POWER multi-year historical economics path.
 - [x] Add Next.js dashboard.
 - [x] Add Recharts dispatch visualization.
 - [x] Add before vs after battery comparison card.
@@ -497,9 +491,9 @@ This endpoint exists so the dashboard can warm the annual-economics cache while 
 
 - How should the score weights change for residential users versus installer or analyst users?
 - Should the default battery sizes become market-specific once the user selects a country?
-- Should annual economics use 20-30 historical years when available instead of the current MVP 10-year sample?
+- Should annual economics use more than the current `2001-2025` range if a longer valid hourly source is available?
 - Should P90 be calculated from annual savings, monthly savings, or a more formal climatology method?
-- How much cached/sample forecast data should ship with the demo?
+- Should the two supported locations ship with prebuilt NASA POWER cache files, or should each developer fetch them locally?
 - Should outage exposure be shown as unserved critical-load hours, lost energy, or a simpler risk score?
 - Should the first UI expose score components, or keep them behind an explanation drawer?
 
@@ -507,6 +501,6 @@ This endpoint exists so the dashboard can warm the annual-economics cache while 
 
 - The name BESSAi is strong because it combines BESS with AI and hints at a localized first demo. The accented final character may create avoidable friction in package names, URLs, and terminal paths, so the codebase should probably use `bessai` while the product UI can display `BESSAi` or `BESSAí`.
 - The MVP should not hide behind ML. The impressive part is a credible loop: forecast, uncertainty estimate, dispatch, economics, explanation.
-- A deterministic fallback forecast is important. The app should still demo well without live API availability.
+- The app should not fabricate weather data. If a required data source is unavailable, it should fail clearly and explain which source failed.
 - The UI should look like an operational energy tool: compact, clear, and data-forward.
 - Implementation should prefer the simplest working version when constraints appear. The defaults in this plan guide the MVP but are not rigid long-term product decisions.

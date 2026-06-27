@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -24,7 +24,7 @@ ANNUALIZATION_DAYS = 365
 BACKUP_HOURS_SCORE_CAP = 8.0
 PAYBACK_RECOMMENDATION_THRESHOLD_YEARS = 10.0
 DEFAULT_HISTORICAL_YEAR = 2024
-DEFAULT_HISTORICAL_YEARS = tuple(range(2016, 2026))
+DEFAULT_HISTORICAL_YEARS = tuple(range(2001, 2026))
 DEFAULT_LOAD_PROFILE_TYPE = "residential_evening"
 LOAD_PROFILE_TYPES = ("residential_evening", "residential_daytime", "small_business", "flat", "custom")
 
@@ -80,25 +80,6 @@ def fetch_open_meteo_forecast(scenario: Scenario, hours: int = 24) -> dict[str, 
     return {
         "time": times[:hours],
         "shortwave_radiation_w_m2": radiation[:hours],
-    }
-
-
-def fallback_clear_sky_forecast(hours: int = 24) -> dict[str, list[Any]]:
-    """Provide a deterministic fallback so the demo still runs offline."""
-    start = datetime.now().replace(minute=0, second=0, microsecond=0)
-    times = [(start + timedelta(hours=offset)).isoformat() for offset in range(hours)]
-    radiation = []
-
-    for offset in range(hours):
-        hour = (start + timedelta(hours=offset)).hour
-        daylight_shape = math.sin(math.pi * (hour - 6) / 12)
-        base = max(0.0, daylight_shape)
-        afternoon_cloud_factor = 0.82 if 13 <= hour <= 16 else 1.0
-        radiation.append(round(860 * base * afternoon_cloud_factor, 1))
-
-    return {
-        "time": times,
-        "shortwave_radiation_w_m2": radiation,
     }
 
 
@@ -942,12 +923,7 @@ def print_raw_vs_corrected_comparison(
 def run_brasilia_demo() -> tuple[list[dict[str, Any]], dict[str, Any], Path]:
     scenario = Scenario()
     forecast_source = "Open-Meteo"
-
-    try:
-        forecast = fetch_open_meteo_forecast(scenario)
-    except Exception as exc:
-        forecast_source = f"fallback sample data ({exc})"
-        forecast = fallback_clear_sky_forecast()
+    forecast = fetch_open_meteo_forecast(scenario)
 
     shortwave = np.array(forecast["shortwave_radiation_w_m2"], dtype=float)
     clock_hours = extract_clock_hours(forecast["time"])
