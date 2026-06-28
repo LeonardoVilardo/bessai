@@ -19,6 +19,7 @@ OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 NASA_POWER_HOURLY_URL = "https://power.larc.nasa.gov/api/temporal/hourly/point"
 OUTPUT_DIR = Path(__file__).resolve().parents[2] / "outputs"
 CACHE_DIR = OUTPUT_DIR / "cache"
+BUNDLED_CACHE_DIR = Path(__file__).resolve().parent / "data" / "cache"
 MVP_BATTERY_SIZES_KWH = (0.0, 5.0, 10.0, 13.5, 15.0, 20.0, 30.0)
 ANNUALIZATION_DAYS = 365
 BACKUP_HOURS_SCORE_CAP = 8.0
@@ -92,9 +93,10 @@ def fetch_nasa_power_hourly_irradiance(
     NASA POWER returns ALLSKY_SFC_SW_DWN hourly values in Wh/m^2. For an hourly
     PV model this can be treated like average W/m^2 over the hour.
     """
-    cache_path = nasa_power_cache_path(scenario, year)
-    if cache_path.exists():
-        return json.loads(cache_path.read_text())
+    runtime_cache_path = nasa_power_cache_path(scenario, year)
+    for cache_path in nasa_power_cache_paths(scenario, year):
+        if cache_path.exists():
+            return json.loads(cache_path.read_text())
 
     params = {
         "parameters": "ALLSKY_SFC_SW_DWN",
@@ -131,14 +133,29 @@ def fetch_nasa_power_hourly_irradiance(
         "year": year,
     }
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(json.dumps(result))
+    runtime_cache_path.write_text(json.dumps(result))
     return result
 
 
-def nasa_power_cache_path(scenario: Scenario, year: int) -> Path:
+def nasa_power_cache_filename(scenario: Scenario, year: int) -> str:
     lat = f"{scenario.latitude:.4f}".replace("-", "m").replace(".", "p")
     lon = f"{scenario.longitude:.4f}".replace("-", "m").replace(".", "p")
-    return CACHE_DIR / f"nasa_power_hourly_{lat}_{lon}_{year}.json"
+    return f"nasa_power_hourly_{lat}_{lon}_{year}.json"
+
+
+def nasa_power_cache_path(scenario: Scenario, year: int) -> Path:
+    return CACHE_DIR / nasa_power_cache_filename(scenario, year)
+
+
+def nasa_power_bundled_cache_path(scenario: Scenario, year: int) -> Path:
+    return BUNDLED_CACHE_DIR / nasa_power_cache_filename(scenario, year)
+
+
+def nasa_power_cache_paths(scenario: Scenario, year: int) -> tuple[Path, Path]:
+    return (
+        nasa_power_cache_path(scenario, year),
+        nasa_power_bundled_cache_path(scenario, year),
+    )
 
 
 def extract_clock_hours(times: list[str]) -> list[int]:

@@ -217,6 +217,7 @@ Optional MVP subsection or tab if the dashboard becomes crowded.
   - Variable: `ALLSKY_SFC_SW_DWN`.
   - Current years: `2001-2025`.
   - Cached locally under `outputs/cache/`.
+  - Optional bundled demo cache can live under `packages/engine/data/cache/` for the two fixed locations.
 
 ### Optional Later
 
@@ -251,12 +252,15 @@ bessai-plan.md
 - Battery discharges when load exceeds PV and during high-tariff hours.
 - Battery keeps a fixed reserve in the current MVP.
 - Forecast uncertainty is reported to the user but does not yet change reserve or dispatch.
+- Forecast uncertainty should eventually use hour-of-day plus seasonal windows, such as week-of-year or rolling 14-30 day periods, rather than only monthly averages.
 - Battery state of charge is bounded between 0 and capacity.
 - Load profile can be generated from average daily consumption with a simple morning/evening shape.
 - Annual savings should use NASA POWER hourly historical irradiance for `2001-2025` when available.
 - Historical annual economics simulate each year independently, then report average, P50, and P90 annual savings.
 - If some NASA POWER years fail, use the real years that loaded and report the missing years.
 - If no NASA POWER years load, stop annual economics and show a clear error.
+- For the current two-location demo, NASA POWER data should be pre-cacheable with `packages/engine/build_historical_cache.py`.
+- Runtime cache in `outputs/cache/` should remain uncommitted; bundled cache data should only be committed intentionally for a deployable portfolio demo.
 - NASA POWER historical data is not a forecast. It is used to estimate likely annual economics from historical weather years.
 - The current 25-year range is acceptable for the MVP. If a longer valid hourly range becomes available, support up to a practical cap such as 50 years.
 - Payback = installed battery cost / annual savings.

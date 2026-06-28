@@ -85,6 +85,20 @@ Fallback order for annual economics:
 
 Downloaded NASA POWER data is cached on the local filesystem under `outputs/cache/`. That directory is ignored by Git. Supabase is not needed for this MVP cache.
 
+For the two supported demo locations, the historical cache can be prepared ahead of time with:
+
+```bash
+python3 packages/engine/build_historical_cache.py
+```
+
+By default this fills `outputs/cache/` for local use. For a polished hosted demo, the same script can write deployable bundled cache files under `packages/engine/data/cache/`:
+
+```bash
+python3 packages/engine/build_historical_cache.py --target bundled
+```
+
+Only use the bundled target when intentionally preparing data assets for deployment or a portfolio demo commit.
+
 ## Local Setup
 
 Run these commands from the project root, meaning the folder that contains `README.md`, `apps/`, `packages/`, and `requirements.txt`.
@@ -183,6 +197,18 @@ Run the deterministic engine demo:
 python3 packages/engine/run_brasilia_demo.py
 ```
 
+Prepare NASA POWER historical cache for both supported locations:
+
+```bash
+python3 packages/engine/build_historical_cache.py
+```
+
+Prepare only one location or a shorter year range:
+
+```bash
+python3 packages/engine/build_historical_cache.py --location brasilia --start-year 2024 --end-year 2025
+```
+
 Run the ML forecast-error demo:
 
 ```bash
@@ -238,6 +264,6 @@ Then open:
 http://localhost:3001
 ```
 
-If the first optimization is slow, it is probably downloading NASA POWER historical data for the selected location. Downloaded data is cached under `outputs/cache/`, which is ignored by Git.
+If the first optimization is slow, it is probably downloading NASA POWER historical data for the selected location. To avoid this during a demo, run `python3 packages/engine/build_historical_cache.py` ahead of time. Downloaded runtime data is cached under `outputs/cache/`, which is ignored by Git.
 
 If Open-Meteo forecast data or NASA POWER historical data is unavailable, the app should show a clear error instead of silently using fake weather data.
