@@ -31,8 +31,9 @@ The MVP should use this loop as its default operating model, while keeping the i
 2. Estimate forecast error using a scikit-learn regression model.
    - Current model class: `GradientBoostingRegressor`.
    - Target: `actual_solar - forecast_solar`.
-   - Real training source when available: Open-Meteo Previous Runs API matched against Open-Meteo Historical Weather API.
-   - If real training rows are unavailable or invalid, mark ML uncertainty as unavailable. Do not train on synthetic rows.
+   - Real training source: an offline artifact built from Open-Meteo Previous Runs API matched against Open-Meteo Historical Weather API.
+   - The `/optimize` route should load the artifact; it should not train from remote archives during the user request.
+   - If the real artifact is unavailable or invalid, mark ML uncertainty as unavailable. Do not train on synthetic rows.
 3. Convert predicted forecast error into a forecast-uncertainty diagnostic.
    - Current displayed uncertainty: absolute predicted forecast error in W/m2.
    - The MVP does not use ML to overwrite the dispatch forecast.
@@ -209,7 +210,7 @@ Optional MVP subsection or tab if the dashboard becomes crowded.
   - Used for next-24h dispatch.
   - Variables: `shortwave_radiation`, `cloud_cover`, `temperature_2m`.
 - Open-Meteo Previous Runs API:
-  - Used to fetch archived previous-day forecasts for ML training when available.
+  - Used by the offline ML builder to fetch archived previous-day forecasts.
 - Open-Meteo Historical Weather API:
   - Used as the actual/reanalysis comparison dataset for ML forecast-error training.
 - NASA POWER Hourly API:
@@ -253,6 +254,7 @@ bessai-plan.md
 - Battery keeps a fixed reserve in the current MVP.
 - Forecast uncertainty is reported to the user but does not yet change reserve or dispatch.
 - Forecast uncertainty should eventually use hour-of-day plus seasonal windows, such as week-of-year or rolling 14-30 day periods, rather than only monthly averages.
+- Current offline ML metadata stores week-of-year by hour-of-day uncertainty summaries.
 - Battery state of charge is bounded between 0 and capacity.
 - Load profile can be generated from average daily consumption with a simple morning/evening shape.
 - Annual savings should use NASA POWER hourly historical irradiance for `2001-2025` when available.
@@ -348,9 +350,9 @@ Current implemented model:
 
 - Library: `scikit-learn`.
 - Model class: `GradientBoostingRegressor`.
-- Training window: Open-Meteo previous-run data from `2024-01-01` through the current date where available.
+- Training window: offline artifact built from the most recent 365 days of Open-Meteo Previous Runs when available.
 - Validation: last 20% holdout rows, reported as raw forecast MAE and model residual MAE.
-- Guardrail: if real rows are missing or have no meaningful error, mark ML uncertainty unavailable and keep dispatch on raw Open-Meteo forecast.
+- Guardrail: if the real artifact is missing, invalid, or not useful, mark ML uncertainty unavailable and keep dispatch on raw Open-Meteo forecast.
 
 Implemented inputs:
 
@@ -365,14 +367,16 @@ Implemented inputs:
 Output:
 
 ```text
-forecast_uncertainty = abs(predicted_error)
+forecast_uncertainty = historical absolute forecast error for the same week-of-year and hour-of-day
 ```
+
+The app currently displays P90 and mean absolute forecast-error uncertainty. This is designed to show seasonal reliability differences, such as dry-season weeks being more predictable than rainy-season weeks. It does not overwrite the raw forecast.
 
 The MVP should train on real matched forecast-error rows when practical:
 
 - Preferred practical source: Open-Meteo Previous Runs API for archived previous-day forecasts.
 - Current actual/reanalysis comparison source: Open-Meteo Historical Weather API.
-- Cache downloaded rows locally with the date window in the filename so repeated demos do not hammer APIs or silently reuse stale rolling-window data.
+- Build local artifacts with `packages/ml/build_forecast_error_artifact.py` so repeated demos do not hammer APIs.
 - Validate that matched rows contain measurable forecast error; if they do not, fall back instead of pretending the model learned useful error.
 
 If real forecast-error data is not available, the MVP should not train a synthetic model. It should keep the interface ready for real archived forecast data later and clearly show that ML diagnostics are unavailable.

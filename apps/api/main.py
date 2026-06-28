@@ -23,7 +23,7 @@ from packages.engine.core import (
     simulate_pv_generation,
     validate_custom_load_shape,
 )
-from packages.ml.forecast_error import ForecastScenario, get_corrected_shortwave_forecast
+from packages.ml.forecast_error import ForecastScenario, get_forecast_uncertainty
 
 
 app = FastAPI(title="BESSAi API", version="0.1.0")
@@ -166,6 +166,25 @@ def dispatch_series(
     ]
 
 
+def forecast_uncertainty_series(ml_forecast: dict[str, Any]) -> list[dict[str, float | str | None]]:
+    times = list(ml_forecast["time"])
+    raw = np.asarray(ml_forecast["raw_shortwave_radiation_w_m2"], dtype=float)
+    p90 = ml_forecast.get("forecast_uncertainty_w_m2")
+    mae = ml_forecast.get("forecast_uncertainty_mae_w_m2")
+    p90_values = [None] * len(times) if p90 is None else [round(float(value), 2) for value in np.asarray(p90)]
+    mae_values = [None] * len(times) if mae is None else [round(float(value), 2) for value in np.asarray(mae)]
+
+    return [
+        {
+            "time": times[index],
+            "raw_shortwave_radiation_w_m2": round(float(raw[index]), 2),
+            "p90_uncertainty_w_m2": p90_values[index],
+            "mae_uncertainty_w_m2": mae_values[index],
+        }
+        for index in range(len(times))
+    ]
+
+
 def candidate_row(case: dict[str, Any]) -> dict[str, Any]:
     payback = case["payback_years"]
     return {
@@ -235,6 +254,7 @@ def ml_diagnostics(ml_forecast: dict[str, Any]) -> dict[str, float | int | str]:
         "mean_forecast_uncertainty_w_m2": nullable_round(ml_forecast["mean_forecast_uncertainty_w_m2"]),
         "max_forecast_uncertainty_w_m2": nullable_round(ml_forecast["max_forecast_uncertainty_w_m2"]),
         "evaluation_basis": ml_forecast["evaluation_basis"],
+        "uncertainty_basis": ml_forecast.get("uncertainty_basis", "unavailable"),
         "correction_applied": bool(ml_forecast["ml_correction_applied"]),
         "correction_reason": ml_forecast["ml_correction_reason"],
     }
@@ -305,7 +325,7 @@ def prefetch_annual_economics(
 def optimize(request: OptimizeRequest = Body(default_factory=OptimizeRequest)) -> dict[str, Any]:
     scenario = build_scenario(request.scenario)
     try:
-        ml_forecast = get_corrected_shortwave_forecast(
+        ml_forecast = get_forecast_uncertainty(
             ForecastScenario(
                 location_name=scenario.location_name,
                 latitude=scenario.latitude,
@@ -405,4 +425,5 @@ def optimize(request: OptimizeRequest = Body(default_factory=OptimizeRequest)) -
         "recommendation": candidate_row(recommended),
         "comparison": [candidate_row(case) for case in cases],
         "dispatch": dispatch_series(times, pv_generation, load, recommended_dispatch),
+        "forecast_uncertainty": forecast_uncertainty_series(ml_forecast),
     }

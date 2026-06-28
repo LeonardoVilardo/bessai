@@ -37,9 +37,17 @@ The current model is:
 - Model class: `GradientBoostingRegressor`
 - Target: `actual_solar - forecast_solar`
 
-When possible, training data is built from:
+The app does not train the ML model inside `/optimize`. Instead, an offline artifact builder prepares the model ahead of time.
 
-- Forecast rows: Open-Meteo Previous Runs API, using previous-day forecast runs from `2024-01-01` through the current date where available.
+Build local ML artifacts for both supported locations:
+
+```bash
+python3 packages/ml/build_forecast_error_artifact.py
+```
+
+By default, this uses the most recent 365 days available from:
+
+- Forecast rows: Open-Meteo Previous Runs API, using previous-day forecast runs.
 - Actual/reanalysis rows: Open-Meteo Historical Weather API.
 
 The matched training rows include:
@@ -53,9 +61,17 @@ The matched training rows include:
 - actual irradiance
 - forecast error
 
-If real matched forecast-error rows are unavailable or not useful, ML diagnostics are marked unavailable. The app does not train on synthetic forecast-error data.
+The artifact also stores a week-of-year by hour-of-day uncertainty summary. That is more granular than monthly averages while avoiding a false claim that one exact calendar day has enough samples.
 
-The matched forecast-error training data is cached locally under `outputs/cache/`. The cache filename includes the training window so the app does not silently reuse an old rolling window as if it were current.
+If a real matched forecast-error artifact is unavailable or not useful, ML diagnostics are marked unavailable. The app does not train on synthetic forecast-error data.
+
+The matched forecast-error model artifact is cached locally under `outputs/cache/`. For a hosted portfolio demo, the same builder can write bundled artifacts under `packages/ml/data/cache/`:
+
+```bash
+python3 packages/ml/build_forecast_error_artifact.py --target bundled
+```
+
+Only use the bundled target intentionally, when preparing deployable demo assets.
 
 ### Annual Economics
 
@@ -213,6 +229,12 @@ Run the ML forecast-error demo:
 
 ```bash
 python3 packages/ml/run_forecast_error_demo.py
+```
+
+Build the offline ML forecast-error artifact:
+
+```bash
+python3 packages/ml/build_forecast_error_artifact.py
 ```
 
 ## Current Modelling Assumptions

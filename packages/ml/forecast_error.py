@@ -8,8 +8,9 @@ reported as unavailable instead of falling back to synthetic training data.
 from __future__ import annotations
 
 import json
+import pickle
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -23,13 +24,22 @@ from sklearn.ensemble import GradientBoostingRegressor
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HISTORICAL_WEATHER_URL = "https://archive-api.open-meteo.com/v1/archive"
 OPEN_METEO_PREVIOUS_RUNS_URL = "https://previous-runs-api.open-meteo.com/v1/forecast"
+OPEN_METEO_HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 OUTPUT_DIR = Path(__file__).resolve().parents[2] / "outputs"
 CACHE_DIR = OUTPUT_DIR / "cache"
+BUNDLED_CACHE_DIR = Path(__file__).resolve().parent / "data" / "cache"
 PREVIOUS_RUNS_START_DATE = date(2024, 1, 1)
 PREVIOUS_RUNS_LEAD_DAYS = 1
-REAL_MODEL_NOTE = (
+DEFAULT_PREVIOUS_RUNS_PAST_DAYS = 365
+DEFAULT_ARTIFACT_START_DATE = date(2024, 1, 1)
+DEFAULT_ARTIFACT_END_DATE = date(2025, 12, 31)
+REAL_PREVIOUS_RUNS_MODEL_NOTE = (
     "Forecast-error model trained on matched Open-Meteo previous-day forecast "
     "runs and historical weather data. Annual economics remain deterministic and separate."
+)
+REAL_HISTORICAL_FORECAST_MODEL_NOTE = (
+    "Forecast-error model trained on matched Open-Meteo archived forecast and "
+    "historical weather data. Annual economics remain deterministic and separate."
 )
 UNAVAILABLE_MODEL_NOTE = (
     "Forecast-error model unavailable because real matched forecast-error training data "
@@ -121,6 +131,27 @@ def cache_path_for_training_data(
     return CACHE_DIR / f"open_meteo_forecast_error_{safe_name}_{source}_{window_label}.json"
 
 
+def safe_scenario_name(scenario: ForecastScenario) -> str:
+    return "".join(char.lower() if char.isalnum() else "_" for char in scenario.location_name).strip("_")
+
+
+def model_artifact_stem(scenario: ForecastScenario) -> str:
+    return f"forecast_error_model_{safe_scenario_name(scenario)}"
+
+
+def model_artifact_paths(scenario: ForecastScenario, target: str = "runtime") -> tuple[Path, Path]:
+    root = BUNDLED_CACHE_DIR if target == "bundled" else CACHE_DIR
+    stem = model_artifact_stem(scenario)
+    return root / f"{stem}.pkl", root / f"{stem}.metadata.json"
+
+
+def model_artifact_read_paths(scenario: ForecastScenario) -> tuple[tuple[Path, Path], ...]:
+    return (
+        model_artifact_paths(scenario, "runtime"),
+        model_artifact_paths(scenario, "bundled"),
+    )
+
+
 def previous_runs_past_days(today: date | None = None) -> int:
     today = today or date.today()
     return max(1, (today - PREVIOUS_RUNS_START_DATE).days + 1)
@@ -164,6 +195,19 @@ def fetch_open_meteo_historical_rows(
         }
         for index, time in enumerate(times)
     }
+
+
+def fetch_open_meteo_historical_forecast_rows(
+    scenario: ForecastScenario,
+    start_date: str,
+    end_date: str,
+) -> dict[str, dict[str, float]]:
+    return fetch_open_meteo_historical_rows(
+        OPEN_METEO_HISTORICAL_FORECAST_URL,
+        scenario,
+        start_date,
+        end_date,
+    )
 
 
 def fetch_open_meteo_previous_run_rows(
@@ -248,6 +292,146 @@ def validate_real_training_rows(rows: list[dict[str, float | str]]) -> None:
             "Matched historical rows had no measurable forecast error "
             f"(mean absolute error {mean_abs_error:.2f} W/m2)."
         )
+
+
+def date_chunks(start_date: date, end_date: date, chunk_days: int) -> list[tuple[date, date]]:
+    chunks: list[tuple[date, date]] = []
+    current = start_date
+    while current <= end_date:
+        chunk_end = min(current + timedelta(days=chunk_days - 1), end_date)
+        chunks.append((current, chunk_end))
+        current = chunk_end + timedelta(days=1)
+    return chunks
+
+
+def build_historical_forecast_training_rows(
+    scenario: ForecastScenario,
+    start_date: date = DEFAULT_ARTIFACT_START_DATE,
+    end_date: date = DEFAULT_ARTIFACT_END_DATE,
+    chunk_days: int = 31,
+) -> list[dict[str, float | str]]:
+    rows: list[dict[str, float | str]] = []
+    for chunk_start, chunk_end in date_chunks(start_date, end_date, chunk_days):
+        forecast_rows = fetch_open_meteo_historical_forecast_rows(
+            scenario,
+            chunk_start.isoformat(),
+            chunk_end.isoformat(),
+        )
+        actual_rows = fetch_open_meteo_historical_rows(
+            OPEN_METEO_HISTORICAL_WEATHER_URL,
+            scenario,
+            chunk_start.isoformat(),
+            chunk_end.isoformat(),
+        )
+        rows.extend(build_matched_training_rows(forecast_rows, actual_rows))
+
+    rows.sort(key=lambda row: str(row["time"]))
+    validate_real_training_rows(rows)
+    return rows
+
+
+def build_previous_runs_training_rows(
+    scenario: ForecastScenario,
+    past_days: int = DEFAULT_PREVIOUS_RUNS_PAST_DAYS,
+    lead_days: int = PREVIOUS_RUNS_LEAD_DAYS,
+) -> list[dict[str, float | str]]:
+    forecast_rows = fetch_open_meteo_previous_run_rows(scenario, past_days, lead_days)
+    start_date, end_date = date_bounds_from_rows(forecast_rows)
+    actual_rows = fetch_open_meteo_historical_rows(
+        OPEN_METEO_HISTORICAL_WEATHER_URL,
+        scenario,
+        start_date,
+        end_date,
+    )
+    rows = build_matched_training_rows(forecast_rows, actual_rows)
+    rows.sort(key=lambda row: str(row["time"]))
+    validate_real_training_rows(rows)
+    return rows
+
+
+def build_seasonal_uncertainty_summary(rows: list[dict[str, float | str]]) -> list[dict[str, float | int]]:
+    buckets: dict[tuple[int, int], list[float]] = {}
+    for row in rows:
+        timestamp = datetime.fromisoformat(str(row["time"]))
+        week = int(timestamp.isocalendar().week)
+        hour = int(timestamp.hour)
+        error = abs(float(row["forecast_error"]))
+        buckets.setdefault((week, hour), []).append(error)
+
+    summary: list[dict[str, float | int]] = []
+    for (week, hour), errors in sorted(buckets.items()):
+        values = np.array(errors, dtype=float)
+        summary.append(
+            {
+                "week_of_year": week,
+                "hour": hour,
+                "rows": int(values.size),
+                "mae_w_m2": float(np.mean(values)),
+                "p90_abs_error_w_m2": float(np.percentile(values, 90)),
+            }
+        )
+    return summary
+
+
+def train_model_from_rows(
+    rows: list[dict[str, float | str]],
+    training_source: str = "real_open_meteo_previous_runs",
+) -> tuple[GradientBoostingRegressor, dict[str, Any]]:
+    features, forecast_error = features_and_target_from_rows(rows)
+    first_time = str(rows[0]["time"])
+    last_time = str(rows[-1]["time"])
+    model_note = (
+        REAL_HISTORICAL_FORECAST_MODEL_NOTE
+        if training_source == "real_open_meteo_historical_forecast"
+        else REAL_PREVIOUS_RUNS_MODEL_NOTE
+    )
+    metadata: dict[str, Any] = {
+        "training_source": training_source,
+        "model_note": model_note,
+        "training_rows": len(rows),
+        "training_period": f"{first_time[:10]} to {last_time[:10]}",
+        "uncertainty_basis": "week-of-year by hour-of-day historical absolute forecast error",
+        "seasonal_uncertainty": build_seasonal_uncertainty_summary(rows),
+    }
+    metadata.update(evaluate_forecast_error_model(features, forecast_error))
+
+    model = GradientBoostingRegressor(
+        n_estimators=120,
+        max_depth=3,
+        learning_rate=0.05,
+        random_state=7,
+    )
+    model.fit(features, forecast_error)
+    return model, metadata
+
+
+def save_forecast_error_model_artifact(
+    scenario: ForecastScenario,
+    model: GradientBoostingRegressor,
+    metadata: dict[str, Any],
+    target: str = "runtime",
+) -> tuple[Path, Path]:
+    model_path, metadata_path = model_artifact_paths(scenario, target)
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    with model_path.open("wb") as file:
+        pickle.dump(model, file)
+    metadata_path.write_text(json.dumps(metadata, indent=2))
+    return model_path, metadata_path
+
+
+def load_forecast_error_model_artifact(
+    scenario: ForecastScenario,
+) -> tuple[GradientBoostingRegressor, dict[str, Any]]:
+    for model_path, metadata_path in model_artifact_read_paths(scenario):
+        if model_path.exists() and metadata_path.exists():
+            with model_path.open("rb") as file:
+                model = pickle.load(file)
+            metadata = json.loads(metadata_path.read_text())
+            return model, metadata
+    raise RuntimeError(
+        "No offline forecast-error model artifact found. Run "
+        "python3 packages/ml/build_forecast_error_artifact.py first."
+    )
 
 
 def build_real_training_rows(
@@ -342,27 +526,7 @@ def train_forecast_error_model(
     scenario: ForecastScenario | None = None,
 ) -> tuple[GradientBoostingRegressor, dict[str, Any]]:
     scenario = scenario or ForecastScenario()
-    rows = build_real_training_rows(scenario)
-    features, forecast_error = features_and_target_from_rows(rows)
-    first_time = str(rows[0]["time"])
-    last_time = str(rows[-1]["time"])
-    metadata = {
-        "training_source": "real_open_meteo_previous_runs",
-        "model_note": REAL_MODEL_NOTE,
-        "training_rows": len(rows),
-        "training_period": f"{first_time[:10]} to {last_time[:10]}",
-    }
-
-    metadata.update(evaluate_forecast_error_model(features, forecast_error))
-
-    model = GradientBoostingRegressor(
-        n_estimators=120,
-        max_depth=3,
-        learning_rate=0.05,
-        random_state=7,
-    )
-    model.fit(features, forecast_error)
-    return model, metadata
+    return load_forecast_error_model_artifact(scenario)
 
 
 def unavailable_forecast_error_result(
@@ -388,36 +552,48 @@ def unavailable_forecast_error_result(
         "corrected_shortwave_radiation_w_m2": raw_forecast,
         "selected_shortwave_radiation_w_m2": raw_forecast,
         "forecast_uncertainty_w_m2": None,
+        "forecast_uncertainty_mae_w_m2": None,
         "mean_forecast_uncertainty_w_m2": None,
         "max_forecast_uncertainty_w_m2": None,
         "ml_correction_applied": False,
-        "ml_correction_reason": "ML forecast-error uncertainty unavailable; dispatch uses the raw Open-Meteo forecast.",
+        "ml_correction_reason": "Forecast uncertainty artifact unavailable; dispatch uses the raw Open-Meteo forecast.",
     }
 
 
-def correct_forecast(
-    model: GradientBoostingRegressor,
+def seasonal_uncertainty_arrays(
+    metadata: dict[str, Any],
     times: list[str],
-    raw_forecast_w_m2: list[float],
-    cloud_cover_pct: list[float],
-    temperature_2m_c: list[float],
+    raw_forecast_w_m2: np.ndarray,
 ) -> dict[str, np.ndarray]:
-    raw_forecast = np.array(raw_forecast_w_m2, dtype=float)
-    cloud_cover = np.array(cloud_cover_pct, dtype=float)
-    temperature = np.array(temperature_2m_c, dtype=float)
-    features = build_features(raw_forecast, cloud_cover, temperature, times)
-    predicted_error = model.predict(features)
-    predicted_error = np.where(raw_forecast <= 1.0, 0.0, predicted_error)
-    corrected_forecast = np.clip(raw_forecast + predicted_error, 0, None)
+    summary = metadata.get("seasonal_uncertainty") or []
+    by_week_hour = {
+        (int(row["week_of_year"]), int(row["hour"])): row
+        for row in summary
+    }
+    daylight_rows = [row for row in summary if float(row.get("p90_abs_error_w_m2", 0.0)) > 0]
+    fallback_p90 = float(np.median([float(row["p90_abs_error_w_m2"]) for row in daylight_rows])) if daylight_rows else 0.0
+    fallback_mae = float(np.median([float(row["mae_w_m2"]) for row in daylight_rows])) if daylight_rows else 0.0
+
+    p90_values: list[float] = []
+    mae_values: list[float] = []
+    for index, timestamp in enumerate(times):
+        if raw_forecast_w_m2[index] <= 1.0:
+            p90_values.append(0.0)
+            mae_values.append(0.0)
+            continue
+
+        parsed = datetime.fromisoformat(timestamp)
+        row = by_week_hour.get((int(parsed.isocalendar().week), int(parsed.hour)))
+        p90_values.append(float(row["p90_abs_error_w_m2"]) if row else fallback_p90)
+        mae_values.append(float(row["mae_w_m2"]) if row else fallback_mae)
 
     return {
-        "raw_forecast_w_m2": raw_forecast,
-        "predicted_error_w_m2": predicted_error,
-        "corrected_forecast_w_m2": corrected_forecast,
+        "p90_uncertainty_w_m2": np.array(p90_values, dtype=float),
+        "mae_uncertainty_w_m2": np.array(mae_values, dtype=float),
     }
 
 
-def get_corrected_shortwave_forecast(
+def get_forecast_uncertainty(
     scenario: ForecastScenario | None = None,
     hours: int = 24,
 ) -> dict[str, Any]:
@@ -426,29 +602,24 @@ def get_corrected_shortwave_forecast(
     forecast = fetch_open_meteo_solar_forecast(scenario, hours)
 
     try:
-        model, metadata = train_forecast_error_model(scenario)
+        _model, metadata = train_forecast_error_model(scenario)
     except Exception as exc:
         return unavailable_forecast_error_result(forecast, forecast_source, exc)
-    corrected = correct_forecast(
-        model,
-        forecast["time"],
-        forecast["raw_forecast_w_m2"],
-        forecast["cloud_cover_pct"],
-        forecast["temperature_2m_c"],
-    )
-    mae_before = float(metadata["mae_before_correction_w_m2"])
-    mae_after = float(metadata["mae_after_correction_w_m2"])
-    forecast_uncertainty = np.abs(corrected["predicted_error_w_m2"])
-    daylight_uncertainty = forecast_uncertainty[corrected["raw_forecast_w_m2"] > 1.0]
+
+    raw_forecast = np.array(forecast["raw_forecast_w_m2"], dtype=float)
+    uncertainty = seasonal_uncertainty_arrays(metadata, forecast["time"], raw_forecast)
+    forecast_uncertainty = uncertainty["p90_uncertainty_w_m2"]
+    daylight_uncertainty = forecast_uncertainty[raw_forecast > 1.0]
     if daylight_uncertainty.size == 0:
         daylight_uncertainty = forecast_uncertainty
     mean_uncertainty = float(np.mean(daylight_uncertainty))
     max_uncertainty = float(np.max(daylight_uncertainty))
     correction_applied = False
-    selected_shortwave = corrected["raw_forecast_w_m2"]
+    selected_shortwave = raw_forecast
     correction_reason = (
-        "ML is used as a forecast-error uncertainty diagnostic only; dispatch uses the raw "
-        f"Open-Meteo forecast. Current daylight uncertainty estimate averages {mean_uncertainty:.1f} W/m2."
+        "Forecast uncertainty is estimated from historical errors for the same week-of-year "
+        f"and hour-of-day. Dispatch uses the raw Open-Meteo forecast. Current daylight P90 "
+        f"uncertainty averages {mean_uncertainty:.1f} W/m2."
     )
 
     return {
@@ -462,11 +633,13 @@ def get_corrected_shortwave_forecast(
         "mae_after_correction_w_m2": metadata["mae_after_correction_w_m2"],
         "mean_forecast_error_w_m2": metadata["mean_forecast_error_w_m2"],
         "evaluation_basis": metadata["evaluation_basis"],
-        "raw_shortwave_radiation_w_m2": corrected["raw_forecast_w_m2"],
-        "predicted_error_w_m2": corrected["predicted_error_w_m2"],
-        "corrected_shortwave_radiation_w_m2": corrected["corrected_forecast_w_m2"],
+        "uncertainty_basis": metadata.get("uncertainty_basis", "week-of-year by hour-of-day historical error"),
+        "raw_shortwave_radiation_w_m2": raw_forecast,
+        "predicted_error_w_m2": np.zeros_like(raw_forecast),
+        "corrected_shortwave_radiation_w_m2": raw_forecast,
         "selected_shortwave_radiation_w_m2": selected_shortwave,
         "forecast_uncertainty_w_m2": forecast_uncertainty,
+        "forecast_uncertainty_mae_w_m2": uncertainty["mae_uncertainty_w_m2"],
         "mean_forecast_uncertainty_w_m2": mean_uncertainty,
         "max_forecast_uncertainty_w_m2": max_uncertainty,
         "ml_correction_applied": correction_applied,
@@ -474,22 +647,30 @@ def get_corrected_shortwave_forecast(
     }
 
 
+def get_corrected_shortwave_forecast(
+    scenario: ForecastScenario | None = None,
+    hours: int = 24,
+) -> dict[str, Any]:
+    """Backward-compatible wrapper for older engine/API code."""
+    return get_forecast_uncertainty(scenario, hours)
+
+
 def plot_raw_vs_corrected(
     times: list[str],
     raw_forecast_w_m2: np.ndarray,
-    corrected_forecast_w_m2: np.ndarray,
+    uncertainty_w_m2: np.ndarray,
     scenario: ForecastScenario,
 ) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = OUTPUT_DIR / "brasilia_raw_vs_corrected_forecast.png"
+    output_path = OUTPUT_DIR / "brasilia_forecast_uncertainty.png"
     x = np.arange(len(times))
 
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(x, raw_forecast_w_m2, label="Raw Open-Meteo forecast", linewidth=2.4, color="#f59e0b")
-    ax.plot(x, corrected_forecast_w_m2, label="ML-corrected forecast", linewidth=2.4, color="#2563eb")
-    ax.set_title(f"BESSAi Solar Forecast Error Demo - {scenario.location_name}")
+    ax.plot(x, uncertainty_w_m2, label="P90 forecast uncertainty", linewidth=2.4, color="#7c3aed")
+    ax.set_title(f"BESSAi Solar Forecast Uncertainty Demo - {scenario.location_name}")
     ax.set_xlabel("Local forecast hour")
-    ax.set_ylabel("Shortwave radiation (W/m2)")
+    ax.set_ylabel("W/m2")
     ax.set_xticks(x[::2])
     ax.set_xticklabels([datetime.fromisoformat(times[index]).strftime("%H:%M") for index in x[::2]])
     ax.grid(True, alpha=0.22)
@@ -502,15 +683,15 @@ def plot_raw_vs_corrected(
 
 
 def print_forecast_table(times: list[str], corrected: dict[str, np.ndarray]) -> None:
-    print("\nForecast correction table")
-    print("Hour  | Raw forecast | Predicted error | Corrected forecast")
-    print("----------------------------------------------------------")
+    print("\nForecast uncertainty table")
+    print("Hour  | Raw forecast | P90 uncertainty | Mean abs error")
+    print("-------------------------------------------------------")
     for index, timestamp in enumerate(times):
         hour = datetime.fromisoformat(timestamp).strftime("%H:%M")
         raw = corrected["raw_forecast_w_m2"][index]
-        error = corrected["predicted_error_w_m2"][index]
-        corrected_value = corrected["corrected_forecast_w_m2"][index]
-        print(f"{hour} | {raw:12.1f} | {error:15.1f} | {corrected_value:18.1f}")
+        p90 = corrected["forecast_uncertainty_w_m2"][index]
+        mae = corrected["forecast_uncertainty_mae_w_m2"][index]
+        print(f"{hour} | {raw:12.1f} | {p90:15.1f} | {mae:14.1f}")
 
 
 def format_optional_metric(value: Any, unit: str) -> str:
@@ -524,17 +705,17 @@ def run_forecast_error_demo() -> tuple[dict[str, np.ndarray], Path]:
     forecast = get_corrected_shortwave_forecast(scenario)
     corrected = {
         "raw_forecast_w_m2": forecast["raw_shortwave_radiation_w_m2"],
-        "predicted_error_w_m2": forecast["predicted_error_w_m2"],
-        "corrected_forecast_w_m2": forecast["corrected_shortwave_radiation_w_m2"],
+        "forecast_uncertainty_w_m2": forecast["forecast_uncertainty_w_m2"],
+        "forecast_uncertainty_mae_w_m2": forecast["forecast_uncertainty_mae_w_m2"],
     }
     chart_path = plot_raw_vs_corrected(
         list(forecast["time"]),
         corrected["raw_forecast_w_m2"],
-        corrected["corrected_forecast_w_m2"],
+        corrected["forecast_uncertainty_w_m2"],
         scenario,
     )
 
-    print("BESSAi forecast-error ML demo")
+    print("BESSAi forecast uncertainty demo")
     print(f"Location: {scenario.location_name}")
     print(f"Forecast source: {forecast['forecast_source']}")
     print(f"Training source: {forecast['training_source']}")
@@ -549,7 +730,8 @@ def run_forecast_error_demo() -> tuple[dict[str, np.ndarray], Path]:
     )
     print(f"Max forecast uncertainty: {format_optional_metric(forecast['max_forecast_uncertainty_w_m2'], 'W/m2')}")
     print(f"Evaluation basis: {forecast['evaluation_basis']}")
-    print(f"ML uncertainty note: {forecast['ml_correction_reason']}")
+    print(f"Uncertainty basis: {forecast.get('uncertainty_basis', 'unavailable')}")
+    print(f"Uncertainty note: {forecast['ml_correction_reason']}")
     print(f"Model note: {forecast['model_note']}")
     print_forecast_table(list(forecast["time"]), corrected)
     print(f"\nForecast chart: {chart_path}")

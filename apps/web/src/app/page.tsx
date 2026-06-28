@@ -76,6 +76,13 @@ type DispatchPoint = {
   pv_exported_kwh: number;
 };
 
+type ForecastUncertaintyPoint = {
+  time: string;
+  raw_shortwave_radiation_w_m2: number;
+  p90_uncertainty_w_m2: number | null;
+  mae_uncertainty_w_m2: number | null;
+};
+
 type AnnualSimulationDiagnostics = {
   source: string;
   annual_pv_generation_kwh: number;
@@ -101,6 +108,7 @@ type MlDiagnostics = {
   mean_forecast_uncertainty_w_m2: number | null;
   max_forecast_uncertainty_w_m2: number | null;
   evaluation_basis: string;
+  uncertainty_basis: string;
   correction_applied: boolean;
   correction_reason: string;
 };
@@ -139,6 +147,7 @@ type OptimizeResponse = {
   recommendation: Recommendation;
   comparison: Recommendation[];
   dispatch: DispatchPoint[];
+  forecast_uncertainty: ForecastUncertaintyPoint[];
 };
 
 const defaultScenario: ScenarioInput = {
@@ -602,6 +611,17 @@ export default function Home() {
         load: point.load_kwh,
         soc: point.battery_soc_kwh,
         grid: point.grid_import_kwh,
+      })) ?? [],
+    [data],
+  );
+
+  const uncertaintyChartData = useMemo(
+    () =>
+      data?.forecast_uncertainty.map((point) => ({
+        hour: localHour(point.time),
+        raw: point.raw_shortwave_radiation_w_m2,
+        p90: point.p90_uncertainty_w_m2,
+        mae: point.mae_uncertainty_w_m2,
       })) ?? [],
     [data],
   );
@@ -1490,6 +1510,99 @@ export default function Home() {
                     <h3 className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
                       Forecast uncertainty
                     </h3>
+                    {uncertaintyChartData.length ? (
+                      <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-xs font-medium text-slate-700">
+                            Hourly uncertainty profile
+                          </p>
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                            <LegendChip color={COLOR.solar} label="Raw irradiance" />
+                            <LegendChip color="#7c3aed" label="P90 uncertainty" />
+                            <LegendChip color="#a78bfa" label="Mean abs error" />
+                          </div>
+                        </div>
+                        <div className="h-56 min-w-0">
+                          <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
+                            <ComposedChart
+                              data={uncertaintyChartData}
+                              margin={{ left: -8, right: 8, top: 4, bottom: 0 }}
+                            >
+                              <CartesianGrid stroke={COLOR.gridline} vertical={false} />
+                              <XAxis
+                                dataKey="hour"
+                                stroke={COLOR.axis}
+                                tick={{ fontSize: 11, fill: COLOR.tickLabel }}
+                                tickLine={false}
+                                axisLine={{ stroke: COLOR.gridline }}
+                                interval="preserveStartEnd"
+                                minTickGap={24}
+                              />
+                              <YAxis
+                                yAxisId="irradiance"
+                                stroke={COLOR.axis}
+                                tick={{ fontSize: 11, fill: COLOR.tickLabel }}
+                                tickLine={false}
+                                axisLine={false}
+                                width={44}
+                              />
+                              <YAxis
+                                yAxisId="uncertainty"
+                                orientation="right"
+                                stroke={COLOR.axis}
+                                tick={{ fontSize: 11, fill: COLOR.tickLabel }}
+                                tickLine={false}
+                                axisLine={false}
+                                width={36}
+                              />
+                              <Tooltip
+                                cursor={{ stroke: "#cbd5e1", strokeDasharray: "3 3" }}
+                                contentStyle={{
+                                  borderRadius: 6,
+                                  border: "1px solid #e2e8f0",
+                                  background: "#fff",
+                                  fontSize: 12,
+                                  boxShadow: "0 1px 2px rgb(15 23 42 / 0.06)",
+                                  padding: "8px 10px",
+                                }}
+                              />
+                              <Area
+                                yAxisId="uncertainty"
+                                type="monotone"
+                                dataKey="p90"
+                                name="P90 uncertainty"
+                                stroke="#7c3aed"
+                                strokeWidth={1.5}
+                                fill="#ddd6fe"
+                                fillOpacity={0.55}
+                              />
+                              <Line
+                                yAxisId="uncertainty"
+                                type="monotone"
+                                dataKey="mae"
+                                name="Mean abs error"
+                                stroke="#a78bfa"
+                                strokeWidth={1.8}
+                                dot={false}
+                              />
+                              <Line
+                                yAxisId="irradiance"
+                                type="monotone"
+                                dataKey="raw"
+                                name="Raw irradiance"
+                                stroke={COLOR.solar}
+                                strokeWidth={2}
+                                dot={false}
+                              />
+                            </ComposedChart>
+                          </ResponsiveContainer>
+                        </div>
+                        <p className="mt-2 text-xs leading-relaxed text-slate-500">
+                          Uncertainty is looked up by week-of-year and hour-of-day from archived forecast errors.
+                          It informs confidence only; it does not change the dispatch forecast.
+                        </p>
+                      </div>
+                    ) : null}
                     <dl className="grid gap-4 sm:grid-cols-2">
                       <DiagnosticItem
                         label="Model source"
@@ -1521,7 +1634,7 @@ export default function Home() {
                       />
                       <DiagnosticItem
                         label="Mean uncertainty"
-                        help="Average absolute forecast-error estimate over daylight hours in the next forecast window."
+                        help="Average P90 forecast uncertainty over daylight hours in the next forecast window."
                         value={formatOptionalIrradiance(data.model_diagnostics.ml.mean_forecast_uncertainty_w_m2, 1)}
                         hint={
                           data.model_diagnostics.ml.max_forecast_uncertainty_w_m2 === null
@@ -1533,7 +1646,7 @@ export default function Home() {
                         label="Dispatch impact"
                         help="For this MVP, ML informs uncertainty only. It does not overwrite the Open-Meteo forecast used by dispatch."
                         value="Informational"
-                        hint={data.model_diagnostics.ml.correction_reason}
+                        hint={data.model_diagnostics.ml.uncertainty_basis}
                       />
                     </dl>
                     <p className="text-xs leading-relaxed text-slate-500">
