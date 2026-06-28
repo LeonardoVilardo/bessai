@@ -267,14 +267,14 @@ function scenarioFingerprint(scenario: ScenarioInput) {
 function HelpTooltip({ text }: { text: string }) {
   return (
     <span
-      className="group relative inline-flex shrink-0 items-center"
+      className="group/help relative inline-flex shrink-0 items-center"
       tabIndex={0}
       aria-label={text}
     >
       <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-[10px] font-semibold leading-none text-slate-500">
         ?
       </span>
-      <span className="pointer-events-none absolute left-1/2 top-full z-50 mt-1 hidden w-56 -translate-x-1/2 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-left text-xs font-normal normal-case leading-relaxed tracking-normal text-slate-600 shadow-lg group-focus:inline-block group-hover:inline-block">
+      <span className="pointer-events-none absolute left-1/2 top-full z-50 mt-1 hidden w-56 -translate-x-1/2 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-left text-xs font-normal normal-case leading-relaxed tracking-normal text-slate-600 shadow-lg group-focus/help:inline-block group-hover/help:inline-block">
         {text}
       </span>
     </span>
@@ -455,7 +455,7 @@ function DisclosureSection({
 }) {
   return (
     <details
-      className="group rounded-md border border-slate-200 bg-slate-50/70"
+      className="group/disclosure rounded-md border border-slate-200 bg-slate-50/70"
       open={defaultOpen}
     >
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5">
@@ -467,7 +467,7 @@ function DisclosureSection({
             {summary}
           </span>
         </span>
-        <span className="text-lg leading-none text-slate-400 transition group-open:rotate-45">
+        <span className="text-lg leading-none text-slate-400 transition group-open/disclosure:rotate-45">
           +
         </span>
       </summary>
@@ -1400,7 +1400,7 @@ export default function Home() {
               </div>
             </section>
 
-            <details className="group rounded-md border border-slate-200 bg-white">
+            <details className="group/disclosure rounded-md border border-slate-200 bg-white">
               <summary className="flex cursor-pointer list-none items-center justify-between gap-4 border-b border-slate-200 px-5 py-3">
                 <span>
                   <span className="block text-sm font-semibold text-slate-900">
@@ -1410,7 +1410,7 @@ export default function Home() {
                     Annual simulation checks, forecast uncertainty status, and model notes.
                   </span>
                 </span>
-                <span className="text-xl leading-none text-slate-400 transition group-open:rotate-45">
+                <span className="text-xl leading-none text-slate-400 transition group-open/disclosure:rotate-45">
                   +
                 </span>
               </summary>
