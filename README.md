@@ -61,17 +61,17 @@ The matched training rows include:
 - actual irradiance
 - forecast error
 
-The artifact also stores a week-of-year by hour-of-day uncertainty summary. That is more granular than monthly averages while avoiding a false claim that one exact calendar day has enough samples.
+The artifact also stores a rolling seasonal daylight uncertainty summary by week-of-year. This is more granular than monthly averages, but less noisy than exact hour-by-hour buckets with too few samples. It is intended to answer questions like whether the current season is usually predictable or exposed to surprise cloud/rain events.
 
 If a real matched forecast-error artifact is unavailable or not useful, ML diagnostics are marked unavailable. The app does not train on synthetic forecast-error data.
 
-The matched forecast-error model artifact is cached locally under `outputs/cache/`. For a hosted portfolio demo, the same builder can write bundled artifacts under `packages/ml/data/cache/`:
+The matched forecast-error model artifact is cached locally under `outputs/cache/`. This repository also includes bundled artifacts for the two supported demo locations under `packages/ml/data/cache/`. For a hosted portfolio demo, the same builder can refresh those bundled artifacts:
 
 ```bash
 python3 packages/ml/build_forecast_error_artifact.py --target bundled
 ```
 
-Only use the bundled target intentionally, when preparing deployable demo assets.
+Only refresh the bundled target intentionally, when updating deployable demo assets.
 
 ### Annual Economics
 
@@ -101,6 +101,8 @@ Fallback order for annual economics:
 
 Downloaded NASA POWER data is cached on the local filesystem under `outputs/cache/`. That directory is ignored by Git. Supabase is not needed for this MVP cache.
 
+This repository also includes bundled NASA POWER cache files for the two supported demo locations under `packages/engine/data/cache/`. Those bundled files make the portfolio demo faster to run on a new laptop. Local files in `outputs/cache/` take priority when present.
+
 For the two supported demo locations, the historical cache can be prepared ahead of time with:
 
 ```bash
@@ -113,7 +115,7 @@ By default this fills `outputs/cache/` for local use. For a polished hosted demo
 python3 packages/engine/build_historical_cache.py --target bundled
 ```
 
-Only use the bundled target when intentionally preparing data assets for deployment or a portfolio demo commit.
+Only refresh the bundled target when intentionally preparing data assets for deployment or a portfolio demo commit.
 
 ## Local Setup
 

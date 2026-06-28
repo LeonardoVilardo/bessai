@@ -253,8 +253,8 @@ bessai-plan.md
 - Battery discharges when load exceeds PV and during high-tariff hours.
 - Battery keeps a fixed reserve in the current MVP.
 - Forecast uncertainty is reported to the user but does not yet change reserve or dispatch.
-- Forecast uncertainty should eventually use hour-of-day plus seasonal windows, such as week-of-year or rolling 14-30 day periods, rather than only monthly averages.
-- Current offline ML metadata stores week-of-year by hour-of-day uncertainty summaries.
+- Forecast uncertainty should use smoothed seasonal windows rather than exact hour buckets when the training sample is small.
+- Current offline ML metadata stores a rolling 5-week daylight uncertainty summary by week-of-year.
 - Battery state of charge is bounded between 0 and capacity.
 - Load profile can be generated from average daily consumption with a simple morning/evening shape.
 - Annual savings should use NASA POWER hourly historical irradiance for `2001-2025` when available.
@@ -367,10 +367,10 @@ Implemented inputs:
 Output:
 
 ```text
-forecast_uncertainty = historical absolute forecast error for the same week-of-year and hour-of-day
+forecast_uncertainty = P90 historical daylight forecast error from a rolling seasonal window
 ```
 
-The app currently displays P90 and mean absolute forecast-error uncertainty. This is designed to show seasonal reliability differences, such as dry-season weeks being more predictable than rainy-season weeks. It does not overwrite the raw forecast.
+The app currently displays P90 and mean absolute forecast-error uncertainty. This is designed to show seasonal reliability differences, such as dry-season weeks being more predictable than rainy-season weeks, without overfitting exact hour-level noise. It does not overwrite the raw forecast.
 
 The MVP should train on real matched forecast-error rows when practical:
 

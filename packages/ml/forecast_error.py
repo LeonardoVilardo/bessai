@@ -33,6 +33,7 @@ PREVIOUS_RUNS_LEAD_DAYS = 1
 DEFAULT_PREVIOUS_RUNS_PAST_DAYS = 365
 DEFAULT_ARTIFACT_START_DATE = date(2024, 1, 1)
 DEFAULT_ARTIFACT_END_DATE = date(2025, 12, 31)
+SEASONAL_UNCERTAINTY_WINDOW_WEEKS = 2
 REAL_PREVIOUS_RUNS_MODEL_NOTE = (
     "Forecast-error model trained on matched Open-Meteo previous-day forecast "
     "runs and historical weather data. Annual economics remain deterministic and separate."
@@ -349,25 +350,41 @@ def build_previous_runs_training_rows(
     return rows
 
 
+def circular_week_distance(left: int, right: int, weeks_per_year: int = 53) -> int:
+    distance = abs(left - right)
+    return min(distance, weeks_per_year - distance)
+
+
 def build_seasonal_uncertainty_summary(rows: list[dict[str, float | str]]) -> list[dict[str, float | int]]:
-    buckets: dict[tuple[int, int], list[float]] = {}
+    daylight_errors_by_week: dict[int, list[float]] = {}
     for row in rows:
         timestamp = datetime.fromisoformat(str(row["time"]))
         week = int(timestamp.isocalendar().week)
-        hour = int(timestamp.hour)
+        forecast_irradiance = float(row["forecast_irradiance"])
+        actual_irradiance = float(row["actual_irradiance"])
+        if max(forecast_irradiance, actual_irradiance) <= 1.0:
+            continue
+
         error = abs(float(row["forecast_error"]))
-        buckets.setdefault((week, hour), []).append(error)
+        daylight_errors_by_week.setdefault(week, []).append(error)
 
     summary: list[dict[str, float | int]] = []
-    for (week, hour), errors in sorted(buckets.items()):
+    for week in range(1, 54):
+        errors: list[float] = []
+        for source_week, source_errors in daylight_errors_by_week.items():
+            if circular_week_distance(week, source_week) <= SEASONAL_UNCERTAINTY_WINDOW_WEEKS:
+                errors.extend(source_errors)
+        if not errors:
+            continue
+
         values = np.array(errors, dtype=float)
         summary.append(
             {
                 "week_of_year": week,
-                "hour": hour,
                 "rows": int(values.size),
                 "mae_w_m2": float(np.mean(values)),
                 "p90_abs_error_w_m2": float(np.percentile(values, 90)),
+                "window_weeks_each_side": SEASONAL_UNCERTAINTY_WINDOW_WEEKS,
             }
         )
     return summary
@@ -390,7 +407,7 @@ def train_model_from_rows(
         "model_note": model_note,
         "training_rows": len(rows),
         "training_period": f"{first_time[:10]} to {last_time[:10]}",
-        "uncertainty_basis": "week-of-year by hour-of-day historical absolute forecast error",
+        "uncertainty_basis": "rolling 5-week daylight historical absolute forecast error by week-of-year",
         "seasonal_uncertainty": build_seasonal_uncertainty_summary(rows),
     }
     metadata.update(evaluate_forecast_error_model(features, forecast_error))
@@ -566,10 +583,7 @@ def seasonal_uncertainty_arrays(
     raw_forecast_w_m2: np.ndarray,
 ) -> dict[str, np.ndarray]:
     summary = metadata.get("seasonal_uncertainty") or []
-    by_week_hour = {
-        (int(row["week_of_year"]), int(row["hour"])): row
-        for row in summary
-    }
+    by_week = {int(row["week_of_year"]): row for row in summary}
     daylight_rows = [row for row in summary if float(row.get("p90_abs_error_w_m2", 0.0)) > 0]
     fallback_p90 = float(np.median([float(row["p90_abs_error_w_m2"]) for row in daylight_rows])) if daylight_rows else 0.0
     fallback_mae = float(np.median([float(row["mae_w_m2"]) for row in daylight_rows])) if daylight_rows else 0.0
@@ -583,7 +597,7 @@ def seasonal_uncertainty_arrays(
             continue
 
         parsed = datetime.fromisoformat(timestamp)
-        row = by_week_hour.get((int(parsed.isocalendar().week), int(parsed.hour)))
+        row = by_week.get(int(parsed.isocalendar().week))
         p90_values.append(float(row["p90_abs_error_w_m2"]) if row else fallback_p90)
         mae_values.append(float(row["mae_w_m2"]) if row else fallback_mae)
 
@@ -617,8 +631,8 @@ def get_forecast_uncertainty(
     correction_applied = False
     selected_shortwave = raw_forecast
     correction_reason = (
-        "Forecast uncertainty is estimated from historical errors for the same week-of-year "
-        f"and hour-of-day. Dispatch uses the raw Open-Meteo forecast. Current daylight P90 "
+        "Forecast uncertainty is estimated from a rolling seasonal window of historical daylight "
+        f"forecast errors. Dispatch uses the raw Open-Meteo forecast. Current daylight P90 "
         f"uncertainty averages {mean_uncertainty:.1f} W/m2."
     )
 
@@ -633,7 +647,7 @@ def get_forecast_uncertainty(
         "mae_after_correction_w_m2": metadata["mae_after_correction_w_m2"],
         "mean_forecast_error_w_m2": metadata["mean_forecast_error_w_m2"],
         "evaluation_basis": metadata["evaluation_basis"],
-        "uncertainty_basis": metadata.get("uncertainty_basis", "week-of-year by hour-of-day historical error"),
+        "uncertainty_basis": metadata.get("uncertainty_basis", "rolling seasonal daylight historical error"),
         "raw_shortwave_radiation_w_m2": raw_forecast,
         "predicted_error_w_m2": np.zeros_like(raw_forecast),
         "corrected_shortwave_radiation_w_m2": raw_forecast,

@@ -1518,8 +1518,8 @@ export default function Home() {
                           </p>
                           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                             <LegendChip color={COLOR.solar} label="Raw irradiance" />
-                            <LegendChip color="#7c3aed" label="P90 uncertainty" />
-                            <LegendChip color="#a78bfa" label="Mean abs error" />
+                            <LegendChip color="#7c3aed" label="Seasonal P90" />
+                            <LegendChip color="#a78bfa" label="Seasonal mean" />
                           </div>
                         </div>
                         <div className="h-56 min-w-0">
@@ -1570,7 +1570,7 @@ export default function Home() {
                                 yAxisId="uncertainty"
                                 type="monotone"
                                 dataKey="p90"
-                                name="P90 uncertainty"
+                                name="Seasonal P90 uncertainty"
                                 stroke="#7c3aed"
                                 strokeWidth={1.5}
                                 fill="#ddd6fe"
@@ -1580,7 +1580,7 @@ export default function Home() {
                                 yAxisId="uncertainty"
                                 type="monotone"
                                 dataKey="mae"
-                                name="Mean abs error"
+                                name="Seasonal mean error"
                                 stroke="#a78bfa"
                                 strokeWidth={1.8}
                                 dot={false}
@@ -1598,8 +1598,8 @@ export default function Home() {
                           </ResponsiveContainer>
                         </div>
                         <p className="mt-2 text-xs leading-relaxed text-slate-500">
-                          Uncertainty is looked up by week-of-year and hour-of-day from archived forecast errors.
-                          It informs confidence only; it does not change the dispatch forecast.
+                          Uncertainty comes from a rolling seasonal window of archived daylight forecast errors.
+                          It gives a confidence band for this time of year and does not change the dispatch forecast.
                         </p>
                       </div>
                     ) : null}
@@ -1645,7 +1645,7 @@ export default function Home() {
                       <DiagnosticItem
                         label="Dispatch impact"
                         help="For this MVP, ML informs uncertainty only. It does not overwrite the Open-Meteo forecast used by dispatch."
-                        value="Informational"
+                        value="None"
                         hint={data.model_diagnostics.ml.uncertainty_basis}
                       />
                     </dl>
