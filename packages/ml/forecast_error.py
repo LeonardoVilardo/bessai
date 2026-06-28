@@ -439,16 +439,40 @@ def save_forecast_error_model_artifact(
 
 def load_forecast_error_model_artifact(
     scenario: ForecastScenario,
-) -> tuple[GradientBoostingRegressor, dict[str, Any]]:
+) -> tuple[GradientBoostingRegressor | None, dict[str, Any]]:
+    load_errors: list[str] = []
     for model_path, metadata_path in model_artifact_read_paths(scenario):
-        if model_path.exists() and metadata_path.exists():
-            with model_path.open("rb") as file:
-                model = pickle.load(file)
-            metadata = json.loads(metadata_path.read_text())
-            return model, metadata
+        if not metadata_path.exists():
+            continue
+
+        metadata = json.loads(metadata_path.read_text())
+        if model_path.exists():
+            try:
+                with model_path.open("rb") as file:
+                    model = pickle.load(file)
+                return model, metadata
+            except Exception as exc:
+                load_errors.append(f"{model_path.name}: {exc}")
+                metadata["model_note"] = (
+                    f"{metadata.get('model_note', REAL_PREVIOUS_RUNS_MODEL_NOTE)} "
+                    "The deployed app is using the saved seasonal uncertainty metadata directly; "
+                    f"model pickle load skipped because: {exc}."
+                )
+                metadata["training_source"] = f"{metadata.get('training_source', 'real_open_meteo_previous_runs')}_metadata"
+                return None, metadata
+
+        if metadata.get("seasonal_uncertainty"):
+            metadata["model_note"] = (
+                f"{metadata.get('model_note', REAL_PREVIOUS_RUNS_MODEL_NOTE)} "
+                "The deployed app is using saved seasonal uncertainty metadata directly."
+            )
+            metadata["training_source"] = f"{metadata.get('training_source', 'real_open_meteo_previous_runs')}_metadata"
+            return None, metadata
+
     raise RuntimeError(
         "No offline forecast-error model artifact found. Run "
         "python3 packages/ml/build_forecast_error_artifact.py first."
+        + (f" Load errors: {'; '.join(load_errors)}" if load_errors else "")
     )
 
 
@@ -542,7 +566,7 @@ def evaluate_forecast_error_model(
 
 def train_forecast_error_model(
     scenario: ForecastScenario | None = None,
-) -> tuple[GradientBoostingRegressor, dict[str, Any]]:
+) -> tuple[GradientBoostingRegressor | None, dict[str, Any]]:
     scenario = scenario or ForecastScenario()
     return load_forecast_error_model_artifact(scenario)
 
