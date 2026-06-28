@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from datetime import datetime
 from typing import Any
 
 import numpy as np
@@ -26,15 +28,24 @@ from packages.engine.core import (
 from packages.ml.forecast_error import ForecastScenario, get_forecast_uncertainty
 
 
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+]
+
+
+def cors_origins() -> list[str]:
+    configured = os.getenv("BESSAI_CORS_ORIGINS", "")
+    extra_origins = [origin.strip() for origin in configured.split(",") if origin.strip()]
+    return [*DEFAULT_CORS_ORIGINS, *extra_origins]
+
+
 app = FastAPI(title="BESSAi API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-    ],
+    allow_origins=cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -150,6 +161,8 @@ def dispatch_series(
     battery_charge = np.asarray(dispatch["battery_charge"], dtype=float)
     battery_discharge = np.asarray(dispatch["battery_discharge"], dtype=float)
     pv_exported = np.asarray(dispatch["pv_exported"], dtype=float)
+    no_battery_grid_import = np.maximum(load - pv_generation, 0.0)
+    no_battery_pv_exported = np.maximum(pv_generation - load, 0.0)
 
     return [
         {
@@ -158,9 +171,11 @@ def dispatch_series(
             "load_kwh": round(float(load[index]), 4),
             "battery_soc_kwh": round(float(soc[index]), 4),
             "grid_import_kwh": round(float(grid_import[index]), 4),
+            "no_battery_grid_import_kwh": round(float(no_battery_grid_import[index]), 4),
             "battery_charge_kwh": round(float(battery_charge[index]), 4),
             "battery_discharge_kwh": round(float(battery_discharge[index]), 4),
             "pv_exported_kwh": round(float(pv_exported[index]), 4),
+            "no_battery_pv_exported_kwh": round(float(no_battery_pv_exported[index]), 4),
         }
         for index in range(len(times))
     ]
@@ -178,11 +193,61 @@ def forecast_uncertainty_series(ml_forecast: dict[str, Any]) -> list[dict[str, f
         {
             "time": times[index],
             "raw_shortwave_radiation_w_m2": round(float(raw[index]), 2),
-            "p90_uncertainty_w_m2": p90_values[index],
-            "mae_uncertainty_w_m2": mae_values[index],
+            "p90_uncertainty_w_m2": p90_values[index] if float(raw[index]) >= 50 else None,
+            "mae_uncertainty_w_m2": mae_values[index] if float(raw[index]) >= 50 else None,
         }
         for index in range(len(times))
     ]
+
+
+def parse_historical_timestamp(value: str) -> datetime:
+    if len(value) == 10 and value.isdigit():
+        return datetime.strptime(value, "%Y%m%d%H")
+    return datetime.fromisoformat(value)
+
+
+def seasonal_forecast_profile(
+    historical_years: list[dict[str, list[Any]]],
+    ml_forecast: dict[str, Any],
+) -> list[dict[str, float | int | bool | None]]:
+    irradiance_by_week: dict[int, list[float]] = {week: [] for week in range(1, 54)}
+    for historical in historical_years:
+        times = historical["time"]
+        shortwave = historical["shortwave_radiation_w_m2"]
+        for timestamp, value in zip(times, shortwave):
+            irradiance = float(value)
+            if irradiance < 50:
+                continue
+            week = int(parse_historical_timestamp(str(timestamp)).isocalendar().week)
+            irradiance_by_week.setdefault(week, []).append(irradiance)
+
+    uncertainty_by_week = {
+        int(row["week_of_year"]): row
+        for row in ml_forecast.get("seasonal_uncertainty", [])
+    }
+    current_week = int(parse_historical_timestamp(str(ml_forecast["time"][0])).isocalendar().week)
+
+    series: list[dict[str, float | int | bool | None]] = []
+    for week in range(1, 54):
+        irradiance_values = irradiance_by_week.get(week, [])
+        uncertainty = uncertainty_by_week.get(week)
+        series.append(
+            {
+                "week_of_year": week,
+                "is_current_week": week == current_week,
+                "mean_daylight_irradiance_w_m2": (
+                    round(float(np.mean(irradiance_values)), 2) if irradiance_values else None
+                ),
+                "p90_uncertainty_w_m2": (
+                    round(float(uncertainty["p90_abs_error_w_m2"]), 2) if uncertainty else None
+                ),
+                "mean_uncertainty_w_m2": (
+                    round(float(uncertainty["mae_w_m2"]), 2) if uncertainty else None
+                ),
+                "uncertainty_rows": int(uncertainty["rows"]) if uncertainty else 0,
+            }
+        )
+    return series
 
 
 def candidate_row(case: dict[str, Any]) -> dict[str, Any]:
@@ -426,4 +491,5 @@ def optimize(request: OptimizeRequest = Body(default_factory=OptimizeRequest)) -
         "comparison": [candidate_row(case) for case in cases],
         "dispatch": dispatch_series(times, pv_generation, load, recommended_dispatch),
         "forecast_uncertainty": forecast_uncertainty_series(ml_forecast),
+        "seasonal_forecast_profile": seasonal_forecast_profile(historical_years, ml_forecast),
     }

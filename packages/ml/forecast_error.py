@@ -34,6 +34,7 @@ DEFAULT_PREVIOUS_RUNS_PAST_DAYS = 365
 DEFAULT_ARTIFACT_START_DATE = date(2024, 1, 1)
 DEFAULT_ARTIFACT_END_DATE = date(2025, 12, 31)
 SEASONAL_UNCERTAINTY_WINDOW_WEEKS = 2
+MIN_IRRADIANCE_FOR_UNCERTAINTY_W_M2 = 50.0
 REAL_PREVIOUS_RUNS_MODEL_NOTE = (
     "Forecast-error model trained on matched Open-Meteo previous-day forecast "
     "runs and historical weather data. Annual economics remain deterministic and separate."
@@ -570,6 +571,7 @@ def unavailable_forecast_error_result(
         "selected_shortwave_radiation_w_m2": raw_forecast,
         "forecast_uncertainty_w_m2": None,
         "forecast_uncertainty_mae_w_m2": None,
+        "seasonal_uncertainty": [],
         "mean_forecast_uncertainty_w_m2": None,
         "max_forecast_uncertainty_w_m2": None,
         "ml_correction_applied": False,
@@ -591,7 +593,7 @@ def seasonal_uncertainty_arrays(
     p90_values: list[float] = []
     mae_values: list[float] = []
     for index, timestamp in enumerate(times):
-        if raw_forecast_w_m2[index] <= 1.0:
+        if raw_forecast_w_m2[index] < MIN_IRRADIANCE_FOR_UNCERTAINTY_W_M2:
             p90_values.append(0.0)
             mae_values.append(0.0)
             continue
@@ -623,7 +625,7 @@ def get_forecast_uncertainty(
     raw_forecast = np.array(forecast["raw_forecast_w_m2"], dtype=float)
     uncertainty = seasonal_uncertainty_arrays(metadata, forecast["time"], raw_forecast)
     forecast_uncertainty = uncertainty["p90_uncertainty_w_m2"]
-    daylight_uncertainty = forecast_uncertainty[raw_forecast > 1.0]
+    daylight_uncertainty = forecast_uncertainty[raw_forecast >= MIN_IRRADIANCE_FOR_UNCERTAINTY_W_M2]
     if daylight_uncertainty.size == 0:
         daylight_uncertainty = forecast_uncertainty
     mean_uncertainty = float(np.mean(daylight_uncertainty))
@@ -654,6 +656,7 @@ def get_forecast_uncertainty(
         "selected_shortwave_radiation_w_m2": selected_shortwave,
         "forecast_uncertainty_w_m2": forecast_uncertainty,
         "forecast_uncertainty_mae_w_m2": uncertainty["mae_uncertainty_w_m2"],
+        "seasonal_uncertainty": metadata.get("seasonal_uncertainty", []),
         "mean_forecast_uncertainty_w_m2": mean_uncertainty,
         "max_forecast_uncertainty_w_m2": max_uncertainty,
         "ml_correction_applied": correction_applied,

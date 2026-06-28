@@ -141,6 +141,18 @@ Next.js 16 requires Node.js `>=20.9.0`. Check your Node version with:
 node -v
 ```
 
+If you use `nvm`, this repo includes `.nvmrc`:
+
+```bash
+nvm use
+```
+
+The frontend API URL is configured with `NEXT_PUBLIC_API_URL`. For local development the default is already `http://127.0.0.1:8000`. A template is available at:
+
+```text
+apps/web/.env.example
+```
+
 ## Run Locally
 
 You need two terminal windows.
@@ -188,6 +200,31 @@ http://localhost:3000
 ```
 
 The dashboard calls the API at `http://127.0.0.1:8000` by default.
+
+## Quick Health Check
+
+After both servers are running:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Expected response:
+
+```json
+{"status":"ok"}
+```
+
+Then open the dashboard and click `Run optimisation`. The default Brasilia scenario should return a recommended battery size, a 24-hour dispatch chart, annual economics, and forecast uncertainty diagnostics.
+
+Before committing a change, run:
+
+```bash
+python3 -m py_compile apps/api/main.py packages/engine/core.py packages/ml/forecast_error.py
+cd apps/web
+npm run lint
+npm run build
+```
 
 ## API Routes
 
@@ -291,3 +328,70 @@ http://localhost:3001
 If the first optimization is slow, it is probably downloading NASA POWER historical data for the selected location. To avoid this during a demo, run `python3 packages/engine/build_historical_cache.py` ahead of time. Downloaded runtime data is cached under `outputs/cache/`, which is ignored by Git.
 
 If Open-Meteo forecast data or NASA POWER historical data is unavailable, the app should show a clear error instead of silently using fake weather data.
+
+## Deployment Notes
+
+The simplest public demo deployment is:
+
+- Backend: Render, Fly.io, Railway, or another Python web service.
+- Frontend: Vercel or another Next.js host.
+
+### Backend Service
+
+Use the repository root as the backend service root.
+
+Suggested settings:
+
+```text
+Runtime: Python 3.11
+Build command: python3 -m pip install -r requirements.txt
+Start command: python3 -m uvicorn apps.api.main:app --host 0.0.0.0 --port $PORT
+```
+
+The backend can run from bundled data for the two supported demo locations:
+
+- NASA POWER cache: `packages/engine/data/cache/`
+- Forecast-error artifacts: `packages/ml/data/cache/`
+
+Runtime downloads and generated outputs go under `outputs/cache/`, which is ignored by Git and should not be committed.
+
+### Frontend Service
+
+Use `apps/web` as the frontend root directory.
+
+Suggested settings:
+
+```text
+Node: 20.11.1 or newer
+Install command: npm install
+Build command: npm run build
+Output: Next.js default
+```
+
+Set this frontend environment variable to the deployed backend URL:
+
+```text
+NEXT_PUBLIC_API_URL=https://your-backend-service.example.com
+```
+
+Set this backend environment variable to the deployed frontend URL:
+
+```text
+BESSAI_CORS_ORIGINS=https://your-frontend.example.com
+```
+
+Multiple origins can be comma-separated. Localhost origins are allowed by default for development.
+
+### Demo Data Policy
+
+For a public portfolio demo, commit only intentional bundled demo assets under `packages/engine/data/cache/` and `packages/ml/data/cache/`.
+
+Do not commit:
+
+- `.venv/`
+- `node_modules/`
+- `.next/`
+- `outputs/`
+- local notes or machine-specific paths
+
+The app should not fabricate weather data. If a required live API is unavailable and no bundled real data exists for that part of the workflow, the API should return a clear error.

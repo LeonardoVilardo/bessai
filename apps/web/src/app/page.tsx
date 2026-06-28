@@ -5,6 +5,7 @@ import {
   CartesianGrid,
   ComposedChart,
   Line,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -71,9 +72,11 @@ type DispatchPoint = {
   load_kwh: number;
   battery_soc_kwh: number;
   grid_import_kwh: number;
+  no_battery_grid_import_kwh: number;
   battery_charge_kwh: number;
   battery_discharge_kwh: number;
   pv_exported_kwh: number;
+  no_battery_pv_exported_kwh: number;
 };
 
 type ForecastUncertaintyPoint = {
@@ -81,6 +84,15 @@ type ForecastUncertaintyPoint = {
   raw_shortwave_radiation_w_m2: number;
   p90_uncertainty_w_m2: number | null;
   mae_uncertainty_w_m2: number | null;
+};
+
+type SeasonalForecastProfilePoint = {
+  week_of_year: number;
+  is_current_week: boolean;
+  mean_daylight_irradiance_w_m2: number | null;
+  p90_uncertainty_w_m2: number | null;
+  mean_uncertainty_w_m2: number | null;
+  uncertainty_rows: number;
 };
 
 type AnnualSimulationDiagnostics = {
@@ -148,6 +160,7 @@ type OptimizeResponse = {
   comparison: Recommendation[];
   dispatch: DispatchPoint[];
   forecast_uncertainty: ForecastUncertaintyPoint[];
+  seasonal_forecast_profile: SeasonalForecastProfilePoint[];
 };
 
 const defaultScenario: ScenarioInput = {
@@ -196,6 +209,20 @@ const locationPresets = [
     timezone: "America/Sao_Paulo",
   },
 ];
+
+const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function monthFromIsoWeek(week: number) {
+  const weekMidpoint = new Date(Date.UTC(2024, 0, 4 + (week - 1) * 7));
+  return weekMidpoint.getUTCMonth();
+}
+
+function averageOrNull(values: number[]) {
+  if (!values.length) {
+    return null;
+  }
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
 
 function flatCustomLoadShape(dailyKwh: number) {
   return Array.from({ length: 24 }, () => dailyKwh / 24);
@@ -602,6 +629,7 @@ export default function Home() {
   const [data, setData] = useState<OptimizeResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dispatchMode, setDispatchMode] = useState<"battery" | "no_battery">("battery");
 
   const chartData = useMemo(
     () =>
@@ -609,22 +637,57 @@ export default function Home() {
         hour: localHour(point.time),
         pv: point.pv_generation_kwh,
         load: point.load_kwh,
-        soc: point.battery_soc_kwh,
-        grid: point.grid_import_kwh,
+        soc: dispatchMode === "battery" ? point.battery_soc_kwh : null,
+        grid: dispatchMode === "battery" ? point.grid_import_kwh : point.no_battery_grid_import_kwh,
       })) ?? [],
+    [data, dispatchMode],
+  );
+
+  const seasonalProfileData = useMemo(
+    () => {
+      const monthlyBuckets = MONTH_LABELS.map((label, index) => ({
+        month: index + 1,
+        label,
+        irradiance: [] as number[],
+        p90: [] as number[],
+        mean: [] as number[],
+        rows: 0,
+      }));
+
+      data?.seasonal_forecast_profile.forEach((point) => {
+        const bucket = monthlyBuckets[monthFromIsoWeek(point.week_of_year)];
+        if (point.mean_daylight_irradiance_w_m2 !== null) {
+          bucket.irradiance.push(point.mean_daylight_irradiance_w_m2);
+        }
+        if (point.p90_uncertainty_w_m2 !== null) {
+          bucket.p90.push(point.p90_uncertainty_w_m2);
+        }
+        if (point.mean_uncertainty_w_m2 !== null) {
+          bucket.mean.push(point.mean_uncertainty_w_m2);
+        }
+        bucket.rows += point.uncertainty_rows;
+      });
+
+      return monthlyBuckets.map((bucket) => ({
+        month: bucket.month,
+        label: bucket.label,
+        irradiance: averageOrNull(bucket.irradiance),
+        p90: averageOrNull(bucket.p90),
+        mean: averageOrNull(bucket.mean),
+        rows: bucket.rows,
+      })).map((point) => {
+        const band =
+          point.irradiance === null || point.p90 === null
+            ? null
+            : [Math.max(0, point.irradiance - point.p90), point.irradiance + point.p90];
+        return { ...point, band };
+      });
+    },
     [data],
   );
 
-  const uncertaintyChartData = useMemo(
-    () =>
-      data?.forecast_uncertainty.map((point) => ({
-        hour: localHour(point.time),
-        raw: point.raw_shortwave_radiation_w_m2,
-        p90: point.p90_uncertainty_w_m2,
-        mae: point.mae_uncertainty_w_m2,
-      })) ?? [],
-    [data],
-  );
+  const currentSeasonalPoint = data?.seasonal_forecast_profile.find((point) => point.is_current_week);
+  const currentSeasonalMonth = currentSeasonalPoint ? monthFromIsoWeek(currentSeasonalPoint.week_of_year) + 1 : null;
 
   const currentLocationPreset =
     locationPresets.find(
@@ -1158,14 +1221,42 @@ export default function Home() {
                     Tomorrow&apos;s dispatch
                   </h2>
                   <p className="text-xs text-slate-500">
-                    Hourly profile · 24 h horizon · energy in kWh, SOC on right axis
+                    Hourly profile · {dispatchMode === "battery" ? "recommended battery" : "no-battery baseline"}
                   </p>
                 </div>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-                  <LegendChip color={COLOR.solar} label="PV" />
-                  <LegendChip color={COLOR.load} label="Load" />
-                  <LegendChip color={COLOR.grid} label="Grid import" />
-                  <LegendChip color={COLOR.battery} label="Battery SOC" />
+                <div className="grid gap-2 sm:justify-items-end">
+                  <div className="inline-flex rounded-md border border-slate-200 bg-slate-50 p-0.5 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setDispatchMode("battery")}
+                      className={`rounded px-2.5 py-1 font-medium transition ${
+                        dispatchMode === "battery"
+                          ? "bg-white text-slate-900 shadow-sm"
+                          : "text-slate-500 hover:text-slate-900"
+                      }`}
+                    >
+                      With battery
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDispatchMode("no_battery")}
+                      className={`rounded px-2.5 py-1 font-medium transition ${
+                        dispatchMode === "no_battery"
+                          ? "bg-white text-slate-900 shadow-sm"
+                          : "text-slate-500 hover:text-slate-900"
+                      }`}
+                    >
+                      No battery
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                    <LegendChip color={COLOR.solar} label="PV" />
+                    <LegendChip color={COLOR.load} label="Load" />
+                    <LegendChip color={COLOR.grid} label="Grid import" />
+                    {dispatchMode === "battery" ? (
+                      <LegendChip color={COLOR.battery} label="Battery SOC" />
+                    ) : null}
+                  </div>
                 </div>
               </header>
               <div className="h-[340px] min-w-0 px-2 pb-3 pt-4 sm:h-[460px] sm:px-4">
@@ -1207,15 +1298,17 @@ export default function Home() {
                         axisLine={false}
                         width={44}
                       />
-                      <YAxis
-                        yAxisId="soc"
-                        orientation="right"
-                        stroke={COLOR.axis}
-                        tick={{ fontSize: 11, fill: COLOR.tickLabel }}
-                        tickLine={false}
-                        axisLine={false}
-                        width={36}
-                      />
+                      {dispatchMode === "battery" ? (
+                        <YAxis
+                          yAxisId="soc"
+                          orientation="right"
+                          stroke={COLOR.axis}
+                          tick={{ fontSize: 11, fill: COLOR.tickLabel }}
+                          tickLine={false}
+                          axisLine={false}
+                          width={36}
+                        />
+                      ) : null}
                       <Tooltip
                         cursor={{ stroke: "#cbd5e1", strokeDasharray: "3 3" }}
                         contentStyle={{
@@ -1232,15 +1325,17 @@ export default function Home() {
                           marginBottom: 4,
                         }}
                       />
-                      <Area
-                        yAxisId="soc"
-                        type="monotone"
-                        dataKey="soc"
-                        name="Battery SOC"
-                        stroke={COLOR.battery}
-                        strokeWidth={1.5}
-                        fill="url(#socFill)"
-                      />
+                      {dispatchMode === "battery" ? (
+                        <Area
+                          yAxisId="soc"
+                          type="monotone"
+                          dataKey="soc"
+                          name="Battery SOC"
+                          stroke={COLOR.battery}
+                          strokeWidth={1.5}
+                          fill="url(#socFill)"
+                        />
+                      ) : null}
                       <Line
                         yAxisId="energy"
                         type="monotone"
@@ -1263,7 +1358,7 @@ export default function Home() {
                         yAxisId="energy"
                         type="monotone"
                         dataKey="grid"
-                        name="Grid"
+                        name="Grid import"
                         stroke={COLOR.grid}
                         strokeWidth={2}
                         dot={false}
@@ -1278,8 +1373,8 @@ export default function Home() {
               </div>
             </section>
 
-            <div className="grid gap-6">
-              <section className="rounded-md border border-slate-200 bg-white">
+            <div className="grid min-w-0 gap-6">
+              <section className="min-w-0 overflow-hidden rounded-md border border-slate-200 bg-white">
                 <header className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
                   <h2 className="text-sm font-semibold text-slate-900">
                     Economics sweep
@@ -1435,7 +1530,7 @@ export default function Home() {
                 </span>
               </summary>
               {data ? (
-                <div className="grid gap-5 px-5 py-4 xl:grid-cols-2">
+                <div className="grid gap-6 px-5 py-4">
                   <div className="grid gap-3">
                     <h3 className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
                       Annual simulation
@@ -1510,33 +1605,32 @@ export default function Home() {
                     <h3 className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
                       Forecast uncertainty
                     </h3>
-                    {uncertaintyChartData.length ? (
+                    {seasonalProfileData.length ? (
                       <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
                         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                           <p className="text-xs font-medium text-slate-700">
-                            Hourly uncertainty profile
+                            Seasonal uncertainty profile
                           </p>
                           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                            <LegendChip color={COLOR.solar} label="Raw irradiance" />
-                            <LegendChip color="#7c3aed" label="Seasonal P90" />
-                            <LegendChip color="#a78bfa" label="Seasonal mean" />
+                            <LegendChip color={COLOR.solar} label="Historical irradiance" />
+                            <LegendChip color="#8b5cf6" label="P90 forecast-error band" />
                           </div>
                         </div>
-                        <div className="h-56 min-w-0">
+                        <div className="h-64 min-w-0">
                           <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
                             <ComposedChart
-                              data={uncertaintyChartData}
+                              data={seasonalProfileData}
                               margin={{ left: -8, right: 8, top: 4, bottom: 0 }}
                             >
                               <CartesianGrid stroke={COLOR.gridline} vertical={false} />
                               <XAxis
-                                dataKey="hour"
+                                dataKey="month"
                                 stroke={COLOR.axis}
                                 tick={{ fontSize: 11, fill: COLOR.tickLabel }}
                                 tickLine={false}
                                 axisLine={{ stroke: COLOR.gridline }}
-                                interval="preserveStartEnd"
-                                minTickGap={24}
+                                tickFormatter={(value) => MONTH_LABELS[Number(value) - 1] ?? String(value)}
+                                minTickGap={8}
                               />
                               <YAxis
                                 yAxisId="irradiance"
@@ -1545,15 +1639,6 @@ export default function Home() {
                                 tickLine={false}
                                 axisLine={false}
                                 width={44}
-                              />
-                              <YAxis
-                                yAxisId="uncertainty"
-                                orientation="right"
-                                stroke={COLOR.axis}
-                                tick={{ fontSize: 11, fill: COLOR.tickLabel }}
-                                tickLine={false}
-                                axisLine={false}
-                                width={36}
                               />
                               <Tooltip
                                 cursor={{ stroke: "#cbd5e1", strokeDasharray: "3 3" }}
@@ -1565,31 +1650,49 @@ export default function Home() {
                                   boxShadow: "0 1px 2px rgb(15 23 42 / 0.06)",
                                   padding: "8px 10px",
                                 }}
+                                labelFormatter={(value) => MONTH_LABELS[Number(value) - 1] ?? `Month ${value}`}
+                                formatter={(value, name) => {
+                                  if (Array.isArray(value)) {
+                                    return [
+                                      `${formatNumber(Number(value[0]), 0)}-${formatNumber(Number(value[1]), 0)} W/m²`,
+                                      name,
+                                    ];
+                                  }
+                                  if (typeof value === "number") {
+                                    return [`${formatNumber(value, 0)} W/m²`, name];
+                                  }
+                                  return [value, name];
+                                }}
                               />
+                              {currentSeasonalMonth ? (
+                                <ReferenceLine
+                                  yAxisId="irradiance"
+                                  x={currentSeasonalMonth}
+                                  stroke="#0f172a"
+                                  strokeDasharray="4 4"
+                                  label={{
+                                    value: "current",
+                                    position: "insideTopRight",
+                                    fill: "#334155",
+                                    fontSize: 10,
+                                  }}
+                                />
+                              ) : null}
                               <Area
-                                yAxisId="uncertainty"
+                                yAxisId="irradiance"
                                 type="monotone"
-                                dataKey="p90"
-                                name="Seasonal P90 uncertainty"
-                                stroke="#7c3aed"
-                                strokeWidth={1.5}
-                                fill="#ddd6fe"
-                                fillOpacity={0.55}
-                              />
-                              <Line
-                                yAxisId="uncertainty"
-                                type="monotone"
-                                dataKey="mae"
-                                name="Seasonal mean error"
-                                stroke="#a78bfa"
-                                strokeWidth={1.8}
-                                dot={false}
+                                dataKey="band"
+                                name="P90 forecast-error band"
+                                stroke="none"
+                                fill="#8b5cf6"
+                                fillOpacity={0.18}
+                                activeDot={false}
                               />
                               <Line
                                 yAxisId="irradiance"
                                 type="monotone"
-                                dataKey="raw"
-                                name="Raw irradiance"
+                                dataKey="irradiance"
+                                name="Historical daylight irradiance"
                                 stroke={COLOR.solar}
                                 strokeWidth={2}
                                 dot={false}
@@ -1598,8 +1701,10 @@ export default function Home() {
                           </ResponsiveContainer>
                         </div>
                         <p className="mt-2 text-xs leading-relaxed text-slate-500">
-                          Uncertainty comes from a rolling seasonal window of archived daylight forecast errors.
-                          It gives a confidence band for this time of year and does not change the dispatch forecast.
+                          This annual view compares average historical daylight irradiance with archived forecast-error uncertainty.
+                          The shaded band is the seasonal P90 forecast-error range around the historical irradiance line:
+                          90% of comparable historical daylight forecast misses were smaller than that band width.
+                          Higher P90 means more surprise cloud/rain risk relative to forecasts. Dispatch still uses the raw Open-Meteo forecast.
                         </p>
                       </div>
                     ) : null}
@@ -1634,19 +1739,13 @@ export default function Home() {
                       />
                       <DiagnosticItem
                         label="Mean uncertainty"
-                        help="Average P90 forecast uncertainty over daylight hours in the next forecast window."
+                        help="Average P90 forecast uncertainty for the current seasonal window during daylight hours."
                         value={formatOptionalIrradiance(data.model_diagnostics.ml.mean_forecast_uncertainty_w_m2, 1)}
                         hint={
                           data.model_diagnostics.ml.max_forecast_uncertainty_w_m2 === null
                             ? "Max unavailable"
                             : `Max ${formatNumber(data.model_diagnostics.ml.max_forecast_uncertainty_w_m2, 1)} W/m²`
                         }
-                      />
-                      <DiagnosticItem
-                        label="Dispatch impact"
-                        help="For this MVP, ML informs uncertainty only. It does not overwrite the Open-Meteo forecast used by dispatch."
-                        value="None"
-                        hint={data.model_diagnostics.ml.uncertainty_basis}
                       />
                     </dl>
                     <p className="text-xs leading-relaxed text-slate-500">
