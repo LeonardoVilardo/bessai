@@ -13,6 +13,7 @@ import {
 } from "recharts";
 import { FormEvent, ReactNode, useMemo, useState } from "react";
 import defaultDemoResult from "@/data/default-demo-result.json";
+import westBahiaDemoResult from "@/data/west-bahia-demo-result.json";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
@@ -187,6 +188,7 @@ type OptimizeResponse = {
 };
 
 const defaultOptimizeResponse = defaultDemoResult as OptimizeResponse;
+const westBahiaOptimizeResponse = westBahiaDemoResult as OptimizeResponse;
 const defaultScenario = defaultOptimizeResponse.scenario;
 
 const loadProfileOptions = [
@@ -205,6 +207,7 @@ const locationPresets = [
     latitude: -15.826016,
     longitude: -47.812539,
     timezone: "America/Sao_Paulo",
+    demoResult: defaultOptimizeResponse,
   },
   {
     id: "west_bahia",
@@ -213,6 +216,7 @@ const locationPresets = [
     latitude: -13.792761,
     longitude: -46.104032,
     timezone: "America/Sao_Paulo",
+    demoResult: westBahiaOptimizeResponse,
   },
 ];
 
@@ -290,6 +294,13 @@ function formatNumber(value: number, digits = 1) {
     maximumFractionDigits: digits,
     minimumFractionDigits: digits,
   }).format(value);
+}
+
+function formatInputValue(value: number) {
+  if (!Number.isFinite(value)) {
+    return "";
+  }
+  return Number(value.toFixed(4)).toString();
 }
 
 function formatPercent(value: number, digits = 0) {
@@ -506,7 +517,7 @@ function NumberField({
         <input
           type="number"
           step={step ?? 0.1}
-          value={value}
+          value={formatInputValue(value)}
           onChange={(event) => onChange(Number(event.target.value))}
           className={`h-9 w-full rounded-md border border-slate-300 bg-white px-2.5 ${suffix ? "pr-12" : "pr-2.5"} text-sm tabular-nums text-slate-900 outline-none transition focus:border-slate-900 focus:ring-2 focus:ring-slate-900/10`}
         />
@@ -838,7 +849,7 @@ export default function Home() {
   }
 
   const recommendation = data?.recommendation;
-  const isBundledDemoSnapshot = data === defaultOptimizeResponse;
+  const isBundledDemoSnapshot = data === defaultOptimizeResponse || data === westBahiaOptimizeResponse;
   const bestPaidAlternative = data?.comparison
     .filter((row) => row.battery_size_kwh > 0 && row.annual_savings_after_minimum_bill > 0)
     .sort((left, right) => right.annual_savings_after_minimum_bill - left.annual_savings_after_minimum_bill)[0];
@@ -910,7 +921,12 @@ export default function Home() {
                 </h2>
                 <button
                   type="button"
-                  onClick={() => setScenario(defaultScenario)}
+                  onClick={() => {
+                    setScenario(defaultScenario);
+                    setData(defaultOptimizeResponse);
+                    setError(null);
+                    setDispatchMode("battery");
+                  }}
                   className="text-[11px] font-medium text-slate-500 underline-offset-2 hover:text-slate-900 hover:underline"
                 >
                   Reset
@@ -928,13 +944,10 @@ export default function Home() {
                       const selected =
                         locationPresets.find((preset) => preset.id === event.target.value) ??
                         locationPresets[0];
-                      setScenario((current) => ({
-                        ...current,
-                        location_name: selected.location_name,
-                        latitude: selected.latitude,
-                        longitude: selected.longitude,
-                        timezone: selected.timezone,
-                      }));
+                      setScenario(selected.demoResult.scenario);
+                      setData(selected.demoResult);
+                      setError(null);
+                      setDispatchMode("battery");
                     }}
                     className="h-9 rounded-md border border-slate-300 bg-white px-2.5 text-sm text-slate-900 outline-none transition focus:border-slate-900 focus:ring-2 focus:ring-slate-900/10"
                   >
@@ -1179,6 +1192,13 @@ export default function Home() {
                     ? "Re-run optimisation"
                     : "Run optimisation"}
               </button>
+
+              {isLoading ? (
+                <p className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs leading-relaxed text-blue-800">
+                  This may take up to 50 seconds. Please hold on while BESSAi
+                  loads forecast, historical economics, and optimisation results.
+                </p>
+              ) : null}
 
               {inputsChangedSinceRun ? (
                 <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800">
