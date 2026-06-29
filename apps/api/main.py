@@ -16,7 +16,6 @@ from packages.engine.core import (
     Scenario,
     calculate_metrics,
     extract_clock_hours,
-    fetch_open_meteo_forecast,
     fetch_nasa_power_hourly_irradiance,
     generate_load_profile,
     optimize_battery_size_with_multi_year_history,
@@ -26,6 +25,7 @@ from packages.engine.core import (
     validate_custom_load_shape,
 )
 from packages.ml.forecast_error import ForecastScenario, get_forecast_uncertainty
+from packages.ml.forecast_error import fetch_open_meteo_solar_forecast
 
 
 DEFAULT_CORS_ORIGINS = [
@@ -137,7 +137,18 @@ def scenario_response(input_data: ScenarioInput, scenario: Scenario) -> dict[str
 
 def load_forecast(scenario: Scenario) -> tuple[dict[str, list[Any]], str]:
     try:
-        return fetch_open_meteo_forecast(scenario), "Open-Meteo"
+        forecast = fetch_open_meteo_solar_forecast(
+            ForecastScenario(
+                location_name=scenario.location_name,
+                latitude=scenario.latitude,
+                longitude=scenario.longitude,
+                timezone=scenario.timezone,
+            )
+        )
+        return {
+            "time": forecast["time"],
+            "shortwave_radiation_w_m2": forecast["raw_forecast_w_m2"],
+        }, str(forecast.get("forecast_source", "Open-Meteo live forecast"))
     except Exception as exc:
         raise HTTPException(
             status_code=503,

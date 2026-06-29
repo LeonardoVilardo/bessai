@@ -27,7 +27,11 @@ The backend requests hourly:
 - `cloud_cover`
 - `temperature_2m`
 
-The current horizon is 24 hours. If Open-Meteo is unavailable, the backend returns a clear error and the dashboard does not run dispatch from fabricated weather data.
+The current horizon is 24 hours.
+
+To avoid rate-limit problems on a public demo host, the backend caches the next-24h Open-Meteo forecast by location. Runtime cache files live under `outputs/cache/` and are refreshed at most hourly by default. The repository also includes bundled Open-Meteo forecast snapshots for the two supported demo locations under `packages/ml/data/cache/`.
+
+If a live Open-Meteo refresh fails with a rate limit, the backend uses the latest real cached Open-Meteo forecast available for that location and labels the dispatch source as cached. If no live or cached Open-Meteo forecast is available, the backend returns a clear error. The app does not fabricate weather data.
 
 ### ML Forecast-Error Diagnostics
 

@@ -821,7 +821,12 @@ export default function Home() {
       setData((await response.json()) as OptimizeResponse);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Request failed";
-      setError(`${message}. Check that the FastAPI server is running on ${API_URL}.`);
+      const punctuation = /[.!?]$/.test(message) ? "" : ".";
+      const serverHint =
+        message === "Failed to fetch"
+          ? ` Check that the FastAPI server is running on ${API_URL}.`
+          : "";
+      setError(`${message}${punctuation}${serverHint}`);
     } finally {
       setIsLoading(false);
     }

@@ -8,13 +8,14 @@ reported as unavailable instead of falling back to synthetic training data.
 from __future__ import annotations
 
 import json
+import os
 import pickle
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -35,6 +36,11 @@ DEFAULT_ARTIFACT_START_DATE = date(2024, 1, 1)
 DEFAULT_ARTIFACT_END_DATE = date(2025, 12, 31)
 SEASONAL_UNCERTAINTY_WINDOW_WEEKS = 2
 MIN_IRRADIANCE_FOR_UNCERTAINTY_W_M2 = 50.0
+FORECAST_CACHE_TTL_SECONDS = int(os.getenv("BESSAI_FORECAST_CACHE_TTL_SECONDS", "3600"))
+FORECAST_CACHE_MAX_STALE_SECONDS = int(os.getenv("BESSAI_FORECAST_CACHE_MAX_STALE_SECONDS", str(7 * 24 * 3600)))
+HTTP_HEADERS = {
+    "User-Agent": "BESSAi portfolio demo (https://github.com/leovilardo/BESSAi)",
+}
 REAL_PREVIOUS_RUNS_MODEL_NOTE = (
     "Forecast-error model trained on matched Open-Meteo previous-day forecast "
     "runs and historical weather data. Annual economics remain deterministic and separate."
@@ -61,6 +67,11 @@ def fetch_open_meteo_solar_forecast(
     scenario: ForecastScenario,
     hours: int = 24,
 ) -> dict[str, list[Any]]:
+    runtime_cache_path = forecast_cache_path(scenario, hours, "runtime")
+    cached = load_cached_forecast(runtime_cache_path, max_age_seconds=FORECAST_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+
     params = {
         "latitude": scenario.latitude,
         "longitude": scenario.longitude,
@@ -70,8 +81,29 @@ def fetch_open_meteo_solar_forecast(
     }
     url = f"{OPEN_METEO_URL}?{urlencode(params)}"
 
-    with urlopen(url, timeout=20) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(Request(url, headers=HTTP_HEADERS), timeout=20) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        fallback = load_cached_forecast(
+            runtime_cache_path,
+            max_age_seconds=FORECAST_CACHE_MAX_STALE_SECONDS,
+            fallback_reason=str(exc),
+        )
+        if fallback is not None:
+            return fallback
+
+        bundled = load_cached_forecast(
+            forecast_cache_path(scenario, hours, "bundled"),
+            fallback_reason=str(exc),
+        )
+        if bundled is not None:
+            return bundled
+
+        raise RuntimeError(
+            "Open-Meteo live forecast request failed and no cached Open-Meteo forecast "
+            f"was available for this location. Upstream reason: {exc}"
+        ) from exc
 
     hourly = payload.get("hourly", {})
     times = hourly.get("time")
@@ -82,12 +114,79 @@ def fetch_open_meteo_solar_forecast(
     if not times or not radiation or not cloud_cover or not temperature:
         raise RuntimeError("Open-Meteo response did not include required hourly forecast variables.")
 
-    return {
+    forecast = {
         "time": times[:hours],
         "raw_forecast_w_m2": radiation[:hours],
         "cloud_cover_pct": cloud_cover[:hours],
         "temperature_2m_c": temperature[:hours],
+        "forecast_source": "Open-Meteo live forecast",
     }
+    save_cached_forecast(runtime_cache_path, forecast)
+    return forecast
+
+
+def forecast_cache_path(
+    scenario: ForecastScenario,
+    hours: int = 24,
+    target: str = "runtime",
+) -> Path:
+    root = BUNDLED_CACHE_DIR if target == "bundled" else CACHE_DIR
+    return root / f"open_meteo_forecast_{safe_scenario_name(scenario)}_{hours}h.json"
+
+
+def save_cached_forecast(path: Path, forecast: dict[str, list[Any] | str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "fetched_at_utc": datetime.now(UTC).isoformat(),
+        "forecast": forecast,
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def load_cached_forecast(
+    path: Path,
+    max_age_seconds: int | None = None,
+    fallback_reason: str | None = None,
+) -> dict[str, list[Any]] | None:
+    if not path.exists():
+        return None
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        fetched_at_raw = str(payload["fetched_at_utc"])
+        fetched_at = datetime.fromisoformat(fetched_at_raw)
+        if fetched_at.tzinfo is None:
+            fetched_at = fetched_at.replace(tzinfo=UTC)
+        age_seconds = (datetime.now(UTC) - fetched_at).total_seconds()
+        if max_age_seconds is not None and age_seconds > max_age_seconds:
+            return None
+
+        forecast = dict(payload["forecast"])
+        validate_cached_forecast(forecast)
+    except Exception:
+        return None
+
+    fetched_label = fetched_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    if fallback_reason:
+        forecast["forecast_source"] = (
+            f"Open-Meteo cached forecast from {fetched_label}; live refresh unavailable "
+            f"({fallback_reason})"
+        )
+    else:
+        forecast["forecast_source"] = f"Open-Meteo cached forecast from {fetched_label}"
+    return forecast
+
+
+def validate_cached_forecast(forecast: dict[str, Any]) -> None:
+    required = ("time", "raw_forecast_w_m2", "cloud_cover_pct", "temperature_2m_c")
+    for key in required:
+        value = forecast.get(key)
+        if not isinstance(value, list) or not value:
+            raise RuntimeError(f"Cached forecast missed {key}.")
+
+    length = len(forecast["time"])
+    if any(len(forecast[key]) < length for key in required[1:]):
+        raise RuntimeError("Cached forecast arrays have inconsistent lengths.")
 
 
 def parse_times(times: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -638,8 +737,8 @@ def get_forecast_uncertainty(
     hours: int = 24,
 ) -> dict[str, Any]:
     scenario = scenario or ForecastScenario()
-    forecast_source = "Open-Meteo"
     forecast = fetch_open_meteo_solar_forecast(scenario, hours)
+    forecast_source = str(forecast.get("forecast_source", "Open-Meteo live forecast"))
 
     try:
         _model, metadata = train_forecast_error_model(scenario)
