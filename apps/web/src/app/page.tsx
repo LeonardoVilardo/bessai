@@ -11,7 +11,8 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, ReactNode, useMemo, useState } from "react";
+import defaultDemoResult from "@/data/default-demo-result.json";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
@@ -185,28 +186,8 @@ type OptimizeResponse = {
   seasonal_forecast_profile: SeasonalForecastProfilePoint[];
 };
 
-const defaultScenario: ScenarioInput = {
-  location_name: "Brasilia, Brazil",
-  latitude: -15.826016,
-  longitude: -47.812539,
-  timezone: "America/Sao_Paulo",
-  pv_size_kwp: 10.44,
-  average_monthly_consumption_kwh: 700,
-  average_daily_consumption_kwh: null,
-  critical_load_kw: 1.5,
-  load_profile_type: "residential_evening",
-  custom_load_shape: null,
-  battery_cost_per_kwh: 2500,
-  grid_tariff_per_kwh: 0.95,
-  peak_tariff_per_kwh: 0.95,
-  export_credit_per_kwh: 0.95,
-  minimum_monthly_bill_kwh: 100,
-  tariff_mode: "flat",
-  peak_start_hour: 18,
-  peak_end_hour: 21,
-  outage_duration_hours_per_month: 8,
-  currency: "BRL",
-};
+const defaultOptimizeResponse = defaultDemoResult as OptimizeResponse;
+const defaultScenario = defaultOptimizeResponse.scenario;
 
 const loadProfileOptions = [
   { value: "residential_evening", label: "Residential evening" },
@@ -724,11 +705,10 @@ function buildRationale(
 
 export default function Home() {
   const [scenario, setScenario] = useState(defaultScenario);
-  const [data, setData] = useState<OptimizeResponse | null>(null);
+  const [data, setData] = useState<OptimizeResponse | null>(defaultOptimizeResponse);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dispatchMode, setDispatchMode] = useState<"battery" | "no_battery">("battery");
-  const hasLoadedDefaultScenario = useRef(false);
 
   const chartData = useMemo(
     () =>
@@ -822,7 +802,7 @@ export default function Home() {
   const inputsChangedSinceRun =
     data !== null && scenarioFingerprint(data.scenario) !== scenarioFingerprint(scenario);
 
-  const runOptimizationForScenario = useCallback(async (scenarioToOptimize: ScenarioInput) => {
+  async function runOptimizationForScenario(scenarioToOptimize: ScenarioInput) {
     setIsLoading(true);
     setError(null);
 
@@ -845,15 +825,7 @@ export default function Home() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
-
-  useEffect(() => {
-    if (hasLoadedDefaultScenario.current) {
-      return;
-    }
-    hasLoadedDefaultScenario.current = true;
-    void runOptimizationForScenario(defaultScenario);
-  }, [runOptimizationForScenario]);
+  }
 
   async function runOptimization(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
@@ -861,6 +833,7 @@ export default function Home() {
   }
 
   const recommendation = data?.recommendation;
+  const isBundledDemoSnapshot = data === defaultOptimizeResponse;
   const bestPaidAlternative = data?.comparison
     .filter((row) => row.battery_size_kwh > 0 && row.annual_savings_after_minimum_bill > 0)
     .sort((left, right) => right.annual_savings_after_minimum_bill - left.annual_savings_after_minimum_bill)[0];
@@ -1224,7 +1197,9 @@ export default function Home() {
                   Quick recommendation
                 </h2>
                 <p className="text-xs text-slate-500">
-                  The simple answer first; detailed economics and diagnostics stay below.
+                  {isBundledDemoSnapshot
+                    ? "Bundled demo result shown instantly; run optimisation for live backend results."
+                    : "The simple answer first; detailed economics and diagnostics stay below."}
                 </p>
               </header>
               <div className="grid gap-4 p-5 xl:grid-cols-[minmax(0,1fr)_320px]">

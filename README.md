@@ -8,6 +8,8 @@ The MVP has three main parts:
 - A FastAPI backend that exposes the simulation through HTTP routes.
 - A Next.js dashboard that calls the backend and shows the recommendation, dispatch chart, economics, and diagnostics.
 
+For portfolio/demo use, the dashboard opens with a bundled default optimisation result already visible. That static snapshot lives at `apps/web/src/data/default-demo-result.json`. Clicking `Run optimisation` still calls the FastAPI backend and recalculates results for the current inputs.
+
 The current dashboard is intentionally focused on two demo locations:
 
 - Brasilia, Brazil: `-15.826016, -47.812539`
@@ -215,7 +217,7 @@ Expected response:
 {"status":"ok"}
 ```
 
-Then open the dashboard and click `Run optimisation`. The default Brasilia scenario should return a recommended battery size, a 24-hour dispatch chart, annual economics, and forecast uncertainty diagnostics.
+Then open the dashboard. It should already show the bundled default Brasilia result, including a recommended battery size, a 24-hour dispatch chart, annual economics, and forecast uncertainty diagnostics. Click `Run optimisation` only when you want to recalculate using the live backend for the current inputs.
 
 Before committing a change, run:
 
