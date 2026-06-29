@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 outputs/
 LOCAL_RUN_NOTES.md
+.claude/
+BESSAI_STUDY_GUIDE_LOCAL.md
