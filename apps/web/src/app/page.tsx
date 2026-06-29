@@ -11,7 +11,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { FormEvent, ReactNode, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
@@ -728,6 +728,7 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dispatchMode, setDispatchMode] = useState<"battery" | "no_battery">("battery");
+  const hasLoadedDefaultScenario = useRef(false);
 
   const chartData = useMemo(
     () =>
@@ -821,8 +822,7 @@ export default function Home() {
   const inputsChangedSinceRun =
     data !== null && scenarioFingerprint(data.scenario) !== scenarioFingerprint(scenario);
 
-  async function runOptimization(event?: FormEvent<HTMLFormElement>) {
-    event?.preventDefault();
+  const runOptimizationForScenario = useCallback(async (scenarioToOptimize: ScenarioInput) => {
     setIsLoading(true);
     setError(null);
 
@@ -830,7 +830,7 @@ export default function Home() {
       const response = await fetch(`${API_URL}/optimize`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scenario }),
+        body: JSON.stringify({ scenario: scenarioToOptimize }),
       });
 
       if (!response.ok) {
@@ -845,12 +845,31 @@ export default function Home() {
     } finally {
       setIsLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
+    if (hasLoadedDefaultScenario.current) {
+      return;
+    }
+    hasLoadedDefaultScenario.current = true;
+    void runOptimizationForScenario(defaultScenario);
+  }, [runOptimizationForScenario]);
+
+  async function runOptimization(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    await runOptimizationForScenario(scenario);
   }
 
   const recommendation = data?.recommendation;
   const bestPaidAlternative = data?.comparison
     .filter((row) => row.battery_size_kwh > 0 && row.annual_savings_after_minimum_bill > 0)
     .sort((left, right) => right.annual_savings_after_minimum_bill - left.annual_savings_after_minimum_bill)[0];
+  const quickRecommendationNote =
+    recommendation?.battery_size_kwh === 0
+      ? bestPaidAlternative?.payback_years
+        ? `No paid battery is recommended. The strongest paid bill-savings option is ${bestPaidAlternative.battery_size_kwh} kWh, but its payback would be ${formatNumber(bestPaidAlternative.payback_years, 1)} years, outside the 10-year threshold.`
+        : "No paid battery is recommended because the tested battery sizes do not create positive bill savings after export-credit effects and the minimum monthly bill floor."
+      : null;
   const rationale = data
     ? buildRationale(
         data.recommendation,
@@ -1331,6 +1350,12 @@ export default function Home() {
                     </div>
                   </dl>
                 </section>
+
+                {quickRecommendationNote ? (
+                  <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-amber-900 xl:col-span-2">
+                    {quickRecommendationNote}
+                  </div>
+                ) : null}
               </div>
             </section>
 
