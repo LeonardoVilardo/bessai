@@ -47,8 +47,10 @@ class Scenario:
     system_efficiency: float = 0.80
     grid_tariff_per_kwh: float = 0.95
     peak_tariff_per_kwh: float = 1.50
-    export_credit_per_kwh: float = 0.0
+    export_credit_per_kwh: float = 0.95
+    minimum_monthly_bill_kwh: float = 100.0
     battery_cost_per_kwh: float = 2500.0
+    tariff_mode: str = "flat"
     peak_start_hour: int = 18
     peak_end_hour: int = 21
     outage_duration_hours_per_month: float = 8.0
@@ -324,10 +326,19 @@ def simulate_pv_generation(shortwave_radiation_w_m2: np.ndarray, scenario: Scena
 
 def hourly_tariffs(scenario: Scenario, clock_hours: list[int]) -> np.ndarray:
     tariffs = np.full(len(clock_hours), scenario.grid_tariff_per_kwh, dtype=float)
+    if scenario.tariff_mode == "flat":
+        return tariffs
+
     for index, hour in enumerate(clock_hours):
         if scenario.peak_start_hour <= hour < scenario.peak_end_hour:
             tariffs[index] = scenario.peak_tariff_per_kwh
     return tariffs
+
+
+def minimum_bill_for_period(scenario: Scenario, hours: int) -> float:
+    period_days = hours / 24
+    annual_minimum_bill = scenario.minimum_monthly_bill_kwh * scenario.grid_tariff_per_kwh * 12
+    return annual_minimum_bill * period_days / ANNUALIZATION_DAYS
 
 
 def simulate_battery_dispatch(
@@ -421,9 +432,15 @@ def calculate_metrics(
     import_cost_with_battery = float(np.sum(grid_import * tariffs))
     export_credit_without_battery = no_battery_exported_pv_kwh * scenario.export_credit_per_kwh
     export_credit_with_battery = exported_pv_kwh * scenario.export_credit_per_kwh
-    daily_cost_without_battery = import_cost_without_battery - export_credit_without_battery
-    daily_cost_with_battery = import_cost_with_battery - export_credit_with_battery
-    daily_savings = daily_cost_without_battery - daily_cost_with_battery
+    raw_cost_without_battery = import_cost_without_battery - export_credit_without_battery
+    raw_cost_with_battery = import_cost_with_battery - export_credit_with_battery
+    minimum_bill = minimum_bill_for_period(scenario, len(load_kwh))
+    billed_cost_without_battery = max(raw_cost_without_battery, minimum_bill)
+    billed_cost_with_battery = max(raw_cost_with_battery, minimum_bill)
+    import_savings_before_export_credit = import_cost_without_battery - import_cost_with_battery
+    export_credit_reduction = export_credit_without_battery - export_credit_with_battery
+    raw_energy_savings = raw_cost_without_battery - raw_cost_with_battery
+    bill_savings_after_minimum = billed_cost_without_battery - billed_cost_with_battery
     usable_backup_energy = max(0.0, final_soc - min_soc)
     reserve_backup_energy = max(0.0, reserve_soc - min_soc)
     outage_backup_hours = usable_backup_energy / scenario.critical_load_kw if scenario.critical_load_kw else 0.0
@@ -438,6 +455,7 @@ def calculate_metrics(
         "exported_pv_kwh": exported_pv_kwh,
         "battery_charged_kwh": float(np.sum(battery_charge)),
         "battery_discharged_kwh": float(np.sum(battery_discharge)),
+        "battery_shifted_kwh": float(np.sum(battery_discharge)),
         "curtailed_pv_kwh": curtailed_pv_kwh,
         "self_consumed_pv_kwh": self_consumed_pv_kwh,
         "self_consumption_ratio": safe_divide(self_consumed_pv_kwh, total_pv),
@@ -445,9 +463,18 @@ def calculate_metrics(
         "import_cost_with_battery": import_cost_with_battery,
         "export_credit_without_battery": export_credit_without_battery,
         "export_credit_with_battery": export_credit_with_battery,
-        "daily_cost_without_battery": daily_cost_without_battery,
-        "daily_cost_with_battery": daily_cost_with_battery,
-        "daily_savings": daily_savings,
+        "raw_cost_without_battery": raw_cost_without_battery,
+        "raw_cost_with_battery": raw_cost_with_battery,
+        "minimum_bill": minimum_bill,
+        "billed_cost_without_battery": billed_cost_without_battery,
+        "billed_cost_with_battery": billed_cost_with_battery,
+        "import_savings_before_export_credit": import_savings_before_export_credit,
+        "export_credit_reduction": export_credit_reduction,
+        "raw_energy_savings": raw_energy_savings,
+        "bill_savings_after_minimum": bill_savings_after_minimum,
+        "daily_cost_without_battery": billed_cost_without_battery,
+        "daily_cost_with_battery": billed_cost_with_battery,
+        "daily_savings": bill_savings_after_minimum,
         "outage_backup_hours": outage_backup_hours,
         "reserve_backup_hours": reserve_backup_hours,
         "final_soc_kwh": final_soc,
@@ -507,6 +534,25 @@ def add_blended_scores(cases: list[dict[str, Any]]) -> None:
         case["final_score"] = final_score
 
 
+def select_recommended_case(cases: list[dict[str, Any]]) -> dict[str, Any]:
+    viable_cases = [case for case in cases if case["annual_savings"] > 0 and case["battery_size_kwh"] > 0]
+    payback_qualified_cases = [
+        case for case in viable_cases if case["payback_years"] <= PAYBACK_RECOMMENDATION_THRESHOLD_YEARS
+    ]
+
+    if payback_qualified_cases:
+        recommended = max(payback_qualified_cases, key=lambda case: case["final_score"])
+    else:
+        recommended = next((case for case in cases if case["battery_size_kwh"] == 0), cases[0])
+
+    recommended["passes_payback_threshold"] = bool(payback_qualified_cases) and (
+        recommended["payback_years"] <= PAYBACK_RECOMMENDATION_THRESHOLD_YEARS
+    )
+    recommended["financially_weak_recommendation"] = bool(viable_cases) and not bool(payback_qualified_cases)
+    recommended["resilience_only_not_recommended"] = not bool(viable_cases)
+    return recommended
+
+
 def optimize_battery_size(
     base_scenario: Scenario,
     pv_generation_kwh: np.ndarray,
@@ -519,17 +565,7 @@ def optimize_battery_size(
         for size in battery_sizes_kwh
     ]
     add_blended_scores(cases)
-
-    viable_cases = [case for case in cases if case["annual_savings"] > 0 and case["battery_size_kwh"] > 0]
-    payback_qualified_cases = [
-        case for case in viable_cases if case["payback_years"] <= PAYBACK_RECOMMENDATION_THRESHOLD_YEARS
-    ]
-    recommendation_pool = payback_qualified_cases or viable_cases or cases
-    recommended = max(recommendation_pool, key=lambda case: case["final_score"])
-    recommended["passes_payback_threshold"] = bool(payback_qualified_cases) and (
-        recommended["payback_years"] <= PAYBACK_RECOMMENDATION_THRESHOLD_YEARS
-    )
-    recommended["financially_weak_recommendation"] = bool(viable_cases) and not bool(payback_qualified_cases)
+    recommended = select_recommended_case(cases)
 
     return cases, recommended
 
@@ -574,16 +610,7 @@ def optimize_battery_size_with_annual_history(
         apply_full_period_annual_metrics(case)
 
     add_blended_scores(cases)
-    viable_cases = [case for case in cases if case["annual_savings"] > 0 and case["battery_size_kwh"] > 0]
-    payback_qualified_cases = [
-        case for case in viable_cases if case["payback_years"] <= PAYBACK_RECOMMENDATION_THRESHOLD_YEARS
-    ]
-    recommendation_pool = payback_qualified_cases or viable_cases or cases
-    recommended = max(recommendation_pool, key=lambda case: case["final_score"])
-    recommended["passes_payback_threshold"] = bool(payback_qualified_cases) and (
-        recommended["payback_years"] <= PAYBACK_RECOMMENDATION_THRESHOLD_YEARS
-    )
-    recommended["financially_weak_recommendation"] = bool(viable_cases) and not bool(payback_qualified_cases)
+    recommended = select_recommended_case(cases)
 
     return cases, recommended
 
@@ -651,16 +678,7 @@ def optimize_battery_size_with_multi_year_history(
         cases.append(case)
 
     add_blended_scores(cases)
-    viable_cases = [case for case in cases if case["annual_savings"] > 0 and case["battery_size_kwh"] > 0]
-    payback_qualified_cases = [
-        case for case in viable_cases if case["payback_years"] <= PAYBACK_RECOMMENDATION_THRESHOLD_YEARS
-    ]
-    recommendation_pool = payback_qualified_cases or viable_cases or cases
-    recommended = max(recommendation_pool, key=lambda case: case["final_score"])
-    recommended["passes_payback_threshold"] = bool(payback_qualified_cases) and (
-        recommended["payback_years"] <= PAYBACK_RECOMMENDATION_THRESHOLD_YEARS
-    )
-    recommended["financially_weak_recommendation"] = bool(viable_cases) and not bool(payback_qualified_cases)
+    recommended = select_recommended_case(cases)
 
     return cases, recommended
 

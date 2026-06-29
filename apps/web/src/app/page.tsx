@@ -31,7 +31,8 @@ type ScenarioInput = {
   longitude: number;
   timezone: string;
   pv_size_kwp: number;
-  average_daily_consumption_kwh: number;
+  average_monthly_consumption_kwh: number;
+  average_daily_consumption_kwh: number | null;
   critical_load_kw: number;
   load_profile_type: string;
   custom_load_shape: number[] | null;
@@ -39,6 +40,8 @@ type ScenarioInput = {
   grid_tariff_per_kwh: number;
   peak_tariff_per_kwh: number;
   export_credit_per_kwh: number;
+  minimum_monthly_bill_kwh: number;
+  tariff_mode: string;
   peak_start_hour: number;
   peak_end_hour: number;
   outage_duration_hours_per_month: number;
@@ -48,12 +51,22 @@ type ScenarioInput = {
 type Recommendation = {
   battery_size_kwh: number;
   grid_import_kwh: number;
+  grid_import_before_battery_kwh: number;
+  grid_import_after_battery_kwh: number;
   no_battery_exported_pv_kwh: number;
   exported_pv_kwh: number;
+  exported_pv_before_battery_kwh: number;
+  exported_pv_after_battery_kwh: number;
+  battery_shifted_kwh: number;
   daily_cost_without_battery: number;
   daily_cost_with_battery: number;
   representative_24h_savings: number;
   annualised_savings_estimate: number;
+  annual_import_savings_before_export_credit: number;
+  annual_export_credit_reduction: number;
+  annual_raw_energy_savings: number;
+  annual_savings_after_minimum_bill: number;
+  annual_minimum_bill: number;
   average_annual_savings: number | null;
   p50_annual_savings: number | null;
   p90_annual_savings: number | null;
@@ -64,6 +77,7 @@ type Recommendation = {
   outage_backup_hours: number;
   score: number;
   passes_payback_threshold: boolean;
+  value_driver: string;
 };
 
 type DispatchPoint = {
@@ -103,6 +117,11 @@ type AnnualSimulationDiagnostics = {
   annual_grid_import_with_battery_kwh: number;
   annual_exported_without_battery_kwh: number;
   annual_exported_with_battery_kwh: number;
+  annual_battery_shifted_kwh: number;
+  annual_import_savings_before_export_credit: number;
+  annual_raw_energy_savings: number;
+  annual_savings_after_minimum_bill: number;
+  annual_minimum_bill: number;
   self_consumed_pv_kwh: number;
   self_consumption_ratio: number;
   average_annual_savings: number;
@@ -135,6 +154,9 @@ type Assumptions = {
   reserve_soc_fraction: number;
   load_profile_type: string;
   custom_load_shape_note: string;
+  tariff_mode: string;
+  minimum_monthly_bill_kwh: number;
+  minimum_monthly_bill_estimate: number;
   export_credit_modeled: boolean;
   export_credit_per_kwh: number;
   export_credit_note: string;
@@ -168,15 +190,18 @@ const defaultScenario: ScenarioInput = {
   latitude: -15.826016,
   longitude: -47.812539,
   timezone: "America/Sao_Paulo",
-  pv_size_kwp: 4,
-  average_daily_consumption_kwh: 18,
+  pv_size_kwp: 10.44,
+  average_monthly_consumption_kwh: 700,
+  average_daily_consumption_kwh: null,
   critical_load_kw: 1.5,
   load_profile_type: "residential_evening",
   custom_load_shape: null,
   battery_cost_per_kwh: 2500,
   grid_tariff_per_kwh: 0.95,
-  peak_tariff_per_kwh: 1.5,
-  export_credit_per_kwh: 0,
+  peak_tariff_per_kwh: 0.95,
+  export_credit_per_kwh: 0.95,
+  minimum_monthly_bill_kwh: 100,
+  tariff_mode: "flat",
   peak_start_hour: 18,
   peak_end_hour: 21,
   outage_duration_hours_per_month: 8,
@@ -212,6 +237,14 @@ const locationPresets = [
 
 const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+function monthlyToDailyKwh(monthlyKwh: number) {
+  return monthlyKwh * 12 / 365;
+}
+
+function dailyToMonthlyKwh(dailyKwh: number) {
+  return dailyKwh * 365 / 12;
+}
+
 function monthFromIsoWeek(week: number) {
   const weekMidpoint = new Date(Date.UTC(2024, 0, 4 + (week - 1) * 7));
   return weekMidpoint.getUTCMonth();
@@ -224,8 +257,30 @@ function averageOrNull(values: number[]) {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
+function roundHourlyShape(values: number[], dailyKwh: number) {
+  const targetCents = Math.round(Math.max(0, dailyKwh) * 100);
+  const rawValues = values.length === 24 ? values.map((value) => Math.max(0, value)) : Array.from({ length: 24 }, () => 1);
+  const rawTotal = rawValues.reduce((total, value) => total + value, 0);
+  const scaled = rawTotal > 0 ? rawValues.map((value) => (value / rawTotal) * targetCents) : Array.from({ length: 24 }, () => targetCents / 24);
+  const floors = scaled.map((value) => Math.floor(value));
+  let remainder = targetCents - floors.reduce((total, value) => total + value, 0);
+  const order = scaled
+    .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
+    .sort((left, right) => right.fraction - left.fraction);
+
+  for (const item of order) {
+    if (remainder <= 0) {
+      break;
+    }
+    floors[item.index] += 1;
+    remainder -= 1;
+  }
+
+  return floors.map((value) => Number((value / 100).toFixed(2)));
+}
+
 function flatCustomLoadShape(dailyKwh: number) {
-  return Array.from({ length: 24 }, () => dailyKwh / 24);
+  return roundHourlyShape(Array.from({ length: 24 }, () => 1), dailyKwh);
 }
 
 function formatLoadProfile(value: string) {
@@ -293,11 +348,15 @@ function scaleCustomLoadShape(
   if (currentTotal <= 0) {
     return flatCustomLoadShape(safeDailyKwh);
   }
-  return current.map((value) => (Math.max(0, value) / currentTotal) * safeDailyKwh);
+  return roundHourlyShape(current, safeDailyKwh);
 }
 
 function scenarioFingerprint(scenario: ScenarioInput) {
-  return JSON.stringify(scenario);
+  const normalized = {
+    ...scenario,
+    average_daily_consumption_kwh: null,
+  };
+  return JSON.stringify(normalized);
 }
 
 function HelpTooltip({ text }: { text: string }) {
@@ -424,6 +483,19 @@ function AnnualSavingsBand({
       </div>
     </div>
   );
+}
+
+function formatValueDriver(value: string) {
+  if (value === "both") {
+    return "Financial + resilience";
+  }
+  if (value === "financial") {
+    return "Mainly financial";
+  }
+  if (value === "resilience") {
+    return "Mainly resilience";
+  }
+  return "Weak";
 }
 
 function NumberField({
@@ -573,12 +645,35 @@ function buildRationale(
   const size = rec.battery_size_kwh;
 
   if (size === 0) {
-    lines.push(
-      "No battery size beat the no-battery baseline for this scenario.",
-    );
-    lines.push(
-      "Either the tariff is too low, the daily PV surplus is small, or the battery cost per kWh is too high to justify storage.",
-    );
+    const paidCandidates = candidates.filter((row) => row.battery_size_kwh > 0);
+    const bestSavingsCandidate = paidCandidates
+      .filter((row) => row.annual_savings_after_minimum_bill > 0)
+      .sort((a, b) => b.annual_savings_after_minimum_bill - a.annual_savings_after_minimum_bill)[0];
+
+    if (bestSavingsCandidate?.payback_years) {
+      lines.push(
+        "No battery size passes the 10-year payback threshold, so the financial recommendation is to avoid adding a battery.",
+      );
+      lines.push(
+        `The best bill-savings case is ${bestSavingsCandidate.battery_size_kwh} kWh with ${formatCurrency(bestSavingsCandidate.annual_savings_after_minimum_bill, currency)}/year, but its payback is ${formatNumber(bestSavingsCandidate.payback_years, 1)} years.`,
+      );
+    } else {
+      lines.push(
+        "No battery size creates positive bill savings for this scenario, so the financial recommendation is to avoid adding a battery.",
+      );
+      lines.push(
+        "The exported solar already has value and the bill cannot fall below the configured minimum monthly charge, so avoided grid import does not translate into a lower annual bill.",
+      );
+    }
+
+    const resilienceOnly = paidCandidates
+      .filter((row) => row.battery_size_kwh > 0)
+      .sort((a, b) => b.outage_backup_hours - a.outage_backup_hours)[0];
+    if (resilienceOnly) {
+      lines.push(
+        `${resilienceOnly.battery_size_kwh} kWh would provide about ${formatNumber(resilienceOnly.outage_backup_hours, 1)} backup hours, but this is resilience value rather than bill savings.`,
+      );
+    }
     return lines;
   }
 
@@ -590,10 +685,13 @@ function buildRationale(
   lines.push(
     `Selected ${size} kWh after sweeping ${candidates.length} candidate sizes across ${sizeRange}.`,
   );
+  lines.push(
+    `Value driver: ${formatValueDriver(rec.value_driver).toLowerCase()}. The optimiser estimates ${formatCurrency(rec.annual_import_savings_before_export_credit, currency)} of avoided grid-import cost, then applies export-credit loss and the minimum monthly bill floor, leaving ${formatCurrency(rec.annual_savings_after_minimum_bill, currency)} of annual bill savings.`,
+  );
 
   if (rec.passes_payback_threshold && rec.payback_years) {
     lines.push(
-      `Payback of ${formatNumber(rec.payback_years, 1)} years sits inside the 10-year threshold, with annual savings of ${formatCurrency(rec.annualised_savings_estimate, currency)} based on ${economicsSource}.`,
+      `Payback of ${formatNumber(rec.payback_years, 1)} years sits inside the 10-year threshold, with post-minimum-bill annual savings of ${formatCurrency(rec.annualised_savings_estimate, currency)} based on ${economicsSource}.`,
     );
   } else if (rec.payback_years) {
     lines.push(
@@ -698,7 +796,8 @@ export default function Home() {
     ) ?? locationPresets[0];
 
   const customLoadPreview = useMemo(() => {
-    const shape = scenario.custom_load_shape ?? flatCustomLoadShape(scenario.average_daily_consumption_kwh);
+    const dailyKwh = monthlyToDailyKwh(scenario.average_monthly_consumption_kwh);
+    const shape = scenario.custom_load_shape ?? flatCustomLoadShape(dailyKwh);
     const hourlyLoads = shape.map((value) => Math.max(0, value));
     const totalKwh = hourlyLoads.reduce((total, value) => total + value, 0);
     if (scenario.load_profile_type !== "custom" || totalKwh <= 0) {
@@ -714,7 +813,7 @@ export default function Home() {
       peakHour,
     };
   }, [
-    scenario.average_daily_consumption_kwh,
+    scenario.average_monthly_consumption_kwh,
     scenario.custom_load_shape,
     scenario.load_profile_type,
   ]);
@@ -749,6 +848,9 @@ export default function Home() {
   }
 
   const recommendation = data?.recommendation;
+  const bestPaidAlternative = data?.comparison
+    .filter((row) => row.battery_size_kwh > 0 && row.annual_savings_after_minimum_bill > 0)
+    .sort((left, right) => right.annual_savings_after_minimum_bill - left.annual_savings_after_minimum_bill)[0];
   const rationale = data
     ? buildRationale(
         data.recommendation,
@@ -880,24 +982,28 @@ export default function Home() {
                   }
                 />
                 <NumberField
-                  label="Daily consumption"
-                  value={scenario.average_daily_consumption_kwh}
-                  suffix="kWh"
-                  help="Total electricity used in a typical day. In custom mode, this is calculated from the 24 hourly kWh values."
+                  label="Monthly consumption"
+                  value={scenario.average_monthly_consumption_kwh}
+                  suffix="kWh/month"
+                  help="Typical monthly consumption from the bill. BESSAi converts this to an average daily load internally."
                   onChange={(value) =>
                     setScenario((current) => ({
                       ...current,
-                      average_daily_consumption_kwh: value,
+                      average_monthly_consumption_kwh: value,
+                      average_daily_consumption_kwh: null,
                       custom_load_shape:
                         current.load_profile_type === "custom"
-                          ? scaleCustomLoadShape(current.custom_load_shape, value)
+                          ? scaleCustomLoadShape(current.custom_load_shape, monthlyToDailyKwh(value))
                           : current.custom_load_shape,
                     }))
                   }
                 />
+                <p className="-mt-2 text-[11px] leading-relaxed text-slate-500">
+                  Internal load average: {formatNumber(monthlyToDailyKwh(scenario.average_monthly_consumption_kwh), 1)} kWh/day.
+                </p>
                 <label className="grid gap-1">
                   <LabelWithHelp
-                    help="Presets use the daily consumption total. Custom mode uses exact hourly kWh values."
+                    help="Presets use the monthly consumption total. Custom mode uses exact hourly kWh values and updates the monthly total."
                     className="text-xs font-medium text-slate-600"
                   >
                     Load profile
@@ -910,7 +1016,7 @@ export default function Home() {
                         load_profile_type: event.target.value,
                         custom_load_shape:
                           event.target.value === "custom"
-                            ? current.custom_load_shape ?? flatCustomLoadShape(current.average_daily_consumption_kwh)
+                            ? current.custom_load_shape ?? flatCustomLoadShape(monthlyToDailyKwh(current.average_monthly_consumption_kwh))
                             : current.custom_load_shape,
                       }))
                     }
@@ -924,7 +1030,7 @@ export default function Home() {
                   </select>
                   {scenario.load_profile_type === "custom" ? (
                     <span className="text-[11px] text-slate-500">
-                      Enter exact hourly kWh. Daily consumption is their sum.
+                      Enter exact hourly kWh. Monthly consumption is calculated from their daily sum.
                     </span>
                   ) : null}
                 </label>
@@ -939,7 +1045,7 @@ export default function Home() {
                         onClick={() =>
                           setScenario((current) => ({
                             ...current,
-                            custom_load_shape: flatCustomLoadShape(current.average_daily_consumption_kwh),
+                            custom_load_shape: flatCustomLoadShape(monthlyToDailyKwh(current.average_monthly_consumption_kwh)),
                           }))
                         }
                         className="text-[11px] font-medium text-slate-500 underline-offset-2 hover:text-slate-900 hover:underline"
@@ -948,7 +1054,7 @@ export default function Home() {
                       </button>
                     </div>
                     <div className="grid min-w-0 grid-cols-6 gap-1">
-                      {(scenario.custom_load_shape ?? flatCustomLoadShape(scenario.average_daily_consumption_kwh)).map(
+                      {(scenario.custom_load_shape ?? flatCustomLoadShape(monthlyToDailyKwh(scenario.average_monthly_consumption_kwh))).map(
                         (weight, hour) => (
                           <label key={hour} className="grid min-w-0 gap-0.5">
                             <span className="text-[10px] font-medium tabular-nums text-slate-500">
@@ -965,13 +1071,14 @@ export default function Home() {
                                     current.custom_load_shape,
                                     hour,
                                     Number(event.target.value),
-                                    current.average_daily_consumption_kwh,
+                                    monthlyToDailyKwh(current.average_monthly_consumption_kwh),
                                   );
+                                  const dailyTotal = custom_load_shape.reduce((total, item) => total + item, 0);
                                   return {
                                     ...current,
                                     custom_load_shape,
-                                    average_daily_consumption_kwh:
-                                      custom_load_shape.reduce((total, item) => total + item, 0),
+                                    average_monthly_consumption_kwh: dailyToMonthlyKwh(dailyTotal),
+                                    average_daily_consumption_kwh: null,
                                   };
                                 })
                               }
@@ -983,7 +1090,7 @@ export default function Home() {
                     </div>
                     <p className="text-[11px] leading-relaxed text-slate-500">
                       {customLoadPreview
-                        ? `Daily total: ${formatNumber(customLoadPreview.totalKwh, 1)} kWh/day. Peak hour: ${customLoadPreview.peakHour.toString().padStart(2, "0")}:00 at ${formatNumber(customLoadPreview.peakLoad, 2)} kWh.`
+                        ? `Daily total: ${formatNumber(customLoadPreview.totalKwh, 1)} kWh/day, equivalent to ${formatNumber(dailyToMonthlyKwh(customLoadPreview.totalKwh), 0)} kWh/month. Peak hour: ${customLoadPreview.peakHour.toString().padStart(2, "0")}:00 at ${formatNumber(customLoadPreview.peakLoad, 2)} kWh.`
                         : "All hourly values are zero; the backend will use a flat 1 kWh/hour fallback."}
                     </p>
                   </div>
@@ -1001,7 +1108,7 @@ export default function Home() {
 
               <DisclosureSection
                 title="Economics &amp; tariffs"
-                summary="Use defaults for a quick run, then tune costs when comparing cases."
+                summary="Flat-tariff bill assumptions for existing PV users."
               >
                 <NumberField
                   label="Battery cost"
@@ -1022,41 +1129,46 @@ export default function Home() {
                     value={scenario.grid_tariff_per_kwh}
                     step={0.01}
                     suffix="/kWh"
-                    help="Standard import price paid for grid electricity outside the peak window."
+                    help="Flat import price paid for grid electricity. The main MVP does not assume time-of-use tariffs."
                     onChange={(value) =>
                       setScenario((current) => ({
                         ...current,
                         grid_tariff_per_kwh: value,
+                        peak_tariff_per_kwh:
+                          current.tariff_mode === "flat" ? value : current.peak_tariff_per_kwh,
                       }))
                     }
                   />
                   <NumberField
-                    label="Peak tariff"
-                    value={scenario.peak_tariff_per_kwh}
+                    label="Export credit"
+                    value={scenario.export_credit_per_kwh}
                     step={0.01}
                     suffix="/kWh"
-                    help="Higher import price during the configured peak window, currently 18:00-21:00."
+                    help="Value of each exported kWh. For a credit-based PV bill, start near the grid tariff; lower it if exported energy is credited less than imported energy costs."
                     onChange={(value) =>
                       setScenario((current) => ({
                         ...current,
-                        peak_tariff_per_kwh: value,
+                        export_credit_per_kwh: value,
                       }))
                     }
                   />
                 </div>
                 <NumberField
-                  label="Export credit"
-                  value={scenario.export_credit_per_kwh}
-                  step={0.01}
-                  suffix="/kWh"
-                  help="Value received for each kWh of surplus PV exported to the grid. This is a simplified input, not country-specific tariff policy."
+                  label="Minimum bill"
+                  value={scenario.minimum_monthly_bill_kwh}
+                  step={1}
+                  suffix="kWh/month"
+                  help="Minimum monthly bill expressed as equivalent kWh. BESSAi multiplies this by the grid tariff and applies it as a monthly bill floor."
                   onChange={(value) =>
                     setScenario((current) => ({
                       ...current,
-                      export_credit_per_kwh: value,
+                      minimum_monthly_bill_kwh: value,
                     }))
                   }
                 />
+                <p className="-mt-2 text-[11px] leading-relaxed text-slate-500">
+                  Minimum bill estimate: {formatCurrency(scenario.minimum_monthly_bill_kwh * scenario.grid_tariff_per_kwh, scenario.currency)}/month.
+                </p>
               </DisclosureSection>
 
               <button
@@ -1105,7 +1217,11 @@ export default function Home() {
                     help="Battery size selected from the discrete candidate set using savings, payback, and backup resilience."
                     hint={
                       recommendation
-                        ? recommendation.passes_payback_threshold
+                        ? recommendation.battery_size_kwh === 0
+                          ? bestPaidAlternative?.payback_years
+                            ? `Best paid option: ${formatNumber(bestPaidAlternative.payback_years, 1)} yr payback`
+                            : "No paid option creates bill savings"
+                          : recommendation.passes_payback_threshold
                           ? "Inside 10-year payback"
                           : "Outside 10-year payback"
                         : "Run optimisation to populate"
@@ -1113,7 +1229,7 @@ export default function Home() {
                   />
                   <MetricCard
                     label="P50 annual savings"
-                    help="Median annual savings across historical weather years when multi-year NASA data is available."
+                    help="Median annual bill savings across historical weather years after export-credit effects and the minimum monthly bill floor."
                     value={
                       recommendation
                         ? formatCurrency(
@@ -1145,7 +1261,11 @@ export default function Home() {
                         : "—"
                     }
                     unit={recommendation?.payback_years ? "years" : undefined}
-                    hint="Threshold: 10 years"
+                    hint={
+                      recommendation?.battery_size_kwh === 0 && bestPaidAlternative?.payback_years
+                        ? `Best paid option: ${bestPaidAlternative.battery_size_kwh} kWh at ${formatNumber(bestPaidAlternative.payback_years, 1)} yr`
+                        : "Threshold: 10 years"
+                    }
                   />
                   <MetricCard
                     label="Critical-load backup"
@@ -1166,7 +1286,7 @@ export default function Home() {
                       Before vs after
                     </h3>
                     <p className="text-xs text-slate-500">
-                      Current 24 h forecast window
+                      Average historical daily bill estimate
                     </p>
                   </header>
                   <dl className="grid divide-y divide-slate-200">
@@ -1198,7 +1318,7 @@ export default function Home() {
                     </div>
                     <div className="grid grid-cols-[1fr_auto] items-baseline gap-4 bg-white px-4 py-3">
                       <dt className="text-[11px] font-medium uppercase tracking-[0.1em] text-slate-700">
-                        24 h saving
+                        Avg daily saving
                       </dt>
                       <dd className="text-lg font-semibold tabular-nums text-slate-900">
                         {recommendation
@@ -1212,6 +1332,62 @@ export default function Home() {
                   </dl>
                 </section>
               </div>
+            </section>
+
+            <section className="rounded-md border border-slate-200 bg-white">
+              <header className="border-b border-slate-200 px-5 py-3">
+                <h2 className="text-sm font-semibold text-slate-900">
+                  Battery value breakdown
+                </h2>
+                <p className="text-xs text-slate-500">
+                  Why the selected size creates, or fails to create, bill savings.
+                </p>
+              </header>
+              {recommendation ? (
+                <dl className="grid gap-4 px-5 py-4 sm:grid-cols-2 lg:grid-cols-4">
+                  <DiagnosticItem
+                    label="Grid import before"
+                    value={`${formatNumber(recommendation.grid_import_before_battery_kwh, 0)} kWh/yr`}
+                  />
+                  <DiagnosticItem
+                    label="Grid import after"
+                    value={`${formatNumber(recommendation.grid_import_after_battery_kwh, 0)} kWh/yr`}
+                  />
+                  <DiagnosticItem
+                    label="Export before"
+                    value={`${formatNumber(recommendation.exported_pv_before_battery_kwh, 0)} kWh/yr`}
+                  />
+                  <DiagnosticItem
+                    label="Export after"
+                    value={`${formatNumber(recommendation.exported_pv_after_battery_kwh, 0)} kWh/yr`}
+                  />
+                  <DiagnosticItem
+                    label="Battery-shifted energy"
+                    help="Energy delivered from the battery to load across the annual historical simulation."
+                    value={`${formatNumber(recommendation.battery_shifted_kwh, 0)} kWh/yr`}
+                  />
+                  <DiagnosticItem
+                    label="Avoided import value"
+                    help="Grid-import cost avoided before subtracting lost export credit and before applying the minimum bill floor."
+                    value={formatCurrency(recommendation.annual_import_savings_before_export_credit, scenario.currency)}
+                  />
+                  <DiagnosticItem
+                    label="Bill savings"
+                    help="Annual savings after export-credit effects and the minimum monthly bill floor."
+                    value={formatCurrency(recommendation.annual_savings_after_minimum_bill, scenario.currency)}
+                    hint={`Minimum bill floor: ${formatCurrency(recommendation.annual_minimum_bill, scenario.currency)}/yr`}
+                  />
+                  <DiagnosticItem
+                    label="Value driver"
+                    help="Simple classification based on post-minimum-bill savings and backup hours."
+                    value={formatValueDriver(recommendation.value_driver)}
+                  />
+                </dl>
+              ) : (
+                <div className="px-5 py-4 text-sm text-slate-500">
+                  Run optimisation to see the value breakdown.
+                </div>
+              )}
             </section>
 
             <section className="min-w-0 overflow-hidden rounded-md border border-slate-200 bg-white">
@@ -1390,8 +1566,8 @@ export default function Home() {
                         <th className="px-5 py-2.5 font-medium">Size</th>
                         <th className="px-3 py-2.5 font-medium">Annual grid</th>
                         <th className="px-3 py-2.5 font-medium">Annual cost</th>
-                        <th className="px-3 py-2.5 font-medium">24 h saving</th>
-                        <th className="px-3 py-2.5 font-medium">Annualised</th>
+                        <th className="px-3 py-2.5 font-medium">Avg daily saving</th>
+                        <th className="px-3 py-2.5 font-medium">Annual bill saving</th>
                         <th className="px-3 py-2.5 font-medium">Payback</th>
                         <th className="px-3 py-2.5 font-medium">Backup</th>
                         <th className="px-5 py-2.5 font-medium">Score</th>
@@ -1800,6 +1976,14 @@ export default function Home() {
                   <AssumptionItem
                     label="Load profile"
                     value={`${formatLoadProfile(data.assumptions.load_profile_type)}. ${data.assumptions.custom_load_shape_note}`}
+                  />
+                  <AssumptionItem
+                    label="Tariff mode"
+                    value={data.assumptions.tariff_mode === "flat" ? "Flat tariff" : "Time-of-use tariff"}
+                  />
+                  <AssumptionItem
+                    label="Minimum bill"
+                    value={`${formatNumber(data.assumptions.minimum_monthly_bill_kwh, 0)} kWh/month = ${formatCurrency(data.assumptions.minimum_monthly_bill_estimate, scenario.currency)}/month`}
                   />
                   <AssumptionItem
                     label="Export credit"

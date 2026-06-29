@@ -58,15 +58,18 @@ class ScenarioInput(BaseModel):
     latitude: float = -15.826016
     longitude: float = -47.812539
     timezone: str = "America/Sao_Paulo"
-    pv_size_kwp: float = Field(default=4.0, gt=0)
-    average_daily_consumption_kwh: float = Field(default=18.0, ge=0)
+    pv_size_kwp: float = Field(default=10.44, gt=0)
+    average_monthly_consumption_kwh: float | None = Field(default=700.0, ge=0)
+    average_daily_consumption_kwh: float | None = Field(default=None, ge=0)
     critical_load_kw: float = Field(default=1.5, gt=0)
     load_profile_type: str = "residential_evening"
     custom_load_shape: list[float] | None = None
     battery_cost_per_kwh: float = Field(default=2500.0, ge=0)
     grid_tariff_per_kwh: float = Field(default=0.95, ge=0)
-    peak_tariff_per_kwh: float = Field(default=1.50, ge=0)
-    export_credit_per_kwh: float = Field(default=0.0, ge=0)
+    peak_tariff_per_kwh: float = Field(default=0.95, ge=0)
+    export_credit_per_kwh: float = Field(default=0.95, ge=0)
+    minimum_monthly_bill_kwh: float = Field(default=100.0, ge=0)
+    tariff_mode: str = "flat"
     peak_start_hour: int = Field(default=18, ge=0, le=23)
     peak_end_hour: int = Field(default=21, ge=0, le=24)
     outage_duration_hours_per_month: float = Field(default=8.0, ge=0)
@@ -88,10 +91,18 @@ class PrefetchAnnualEconomicsRequest(BaseModel):
 
 def build_scenario(input_data: ScenarioInput, battery_size_kwh: float = 10.0) -> Scenario:
     custom_load_shape = tuple(input_data.custom_load_shape) if input_data.custom_load_shape is not None else None
-    daily_consumption = input_data.average_daily_consumption_kwh
+    if input_data.average_monthly_consumption_kwh is not None:
+        daily_consumption = input_data.average_monthly_consumption_kwh * 12 / 365
+    else:
+        daily_consumption = input_data.average_daily_consumption_kwh or 0.0
+
     if input_data.load_profile_type == "custom":
         validated_shape, _ = validate_custom_load_shape(custom_load_shape)
         daily_consumption = float(np.sum(validated_shape))
+
+    peak_tariff = input_data.peak_tariff_per_kwh
+    if input_data.tariff_mode == "flat":
+        peak_tariff = input_data.grid_tariff_per_kwh
 
     return Scenario(
         location_name=input_data.location_name,
@@ -106,8 +117,10 @@ def build_scenario(input_data: ScenarioInput, battery_size_kwh: float = 10.0) ->
         battery_capacity_kwh=battery_size_kwh,
         battery_cost_per_kwh=input_data.battery_cost_per_kwh,
         grid_tariff_per_kwh=input_data.grid_tariff_per_kwh,
-        peak_tariff_per_kwh=input_data.peak_tariff_per_kwh,
+        peak_tariff_per_kwh=peak_tariff,
         export_credit_per_kwh=input_data.export_credit_per_kwh,
+        minimum_monthly_bill_kwh=input_data.minimum_monthly_bill_kwh,
+        tariff_mode=input_data.tariff_mode,
         peak_start_hour=input_data.peak_start_hour,
         peak_end_hour=input_data.peak_end_hour,
         outage_duration_hours_per_month=input_data.outage_duration_hours_per_month,
@@ -118,6 +131,7 @@ def build_scenario(input_data: ScenarioInput, battery_size_kwh: float = 10.0) ->
 def scenario_response(input_data: ScenarioInput, scenario: Scenario) -> dict[str, Any]:
     response = input_data.model_dump()
     response["average_daily_consumption_kwh"] = scenario.average_daily_consumption_kwh
+    response["average_monthly_consumption_kwh"] = scenario.average_daily_consumption_kwh * 365 / 12
     return response
 
 
@@ -253,15 +267,38 @@ def seasonal_forecast_profile(
 
 def candidate_row(case: dict[str, Any]) -> dict[str, Any]:
     payback = case["payback_years"]
+    metrics = case["metrics"]
+    annual_savings = float(case["annual_savings"])
+    import_savings = float(metrics.get("import_savings_before_export_credit", 0.0))
+    backup_hours = float(case["outage_backup_hours"])
+    if annual_savings > 0 and backup_hours >= 1:
+        value_driver = "both"
+    elif annual_savings > 0:
+        value_driver = "financial"
+    elif backup_hours >= 1:
+        value_driver = "resilience"
+    else:
+        value_driver = "weak"
+
     return {
         "battery_size_kwh": case["battery_size_kwh"],
         "grid_import_kwh": case["grid_import_kwh"],
+        "grid_import_before_battery_kwh": metrics["no_battery_grid_import_kwh"],
+        "grid_import_after_battery_kwh": metrics["grid_import_kwh"],
         "no_battery_exported_pv_kwh": case["no_battery_exported_pv_kwh"],
         "exported_pv_kwh": case["exported_pv_kwh"],
+        "exported_pv_before_battery_kwh": metrics["no_battery_exported_pv_kwh"],
+        "exported_pv_after_battery_kwh": metrics["exported_pv_kwh"],
+        "battery_shifted_kwh": metrics.get("battery_shifted_kwh", metrics.get("battery_discharged_kwh", 0.0)),
         "daily_cost_without_battery": case["daily_cost_without_battery"],
         "daily_cost_with_battery": case["daily_cost_with_battery"],
         "representative_24h_savings": case["daily_savings"],
         "annualised_savings_estimate": case["annual_savings"],
+        "annual_import_savings_before_export_credit": import_savings,
+        "annual_export_credit_reduction": metrics.get("export_credit_reduction", 0.0),
+        "annual_raw_energy_savings": metrics.get("raw_energy_savings", 0.0),
+        "annual_savings_after_minimum_bill": annual_savings,
+        "annual_minimum_bill": metrics.get("minimum_bill", 0.0),
         "average_annual_savings": case.get("average_annual_savings"),
         "p50_annual_savings": case.get("p50_annual_savings"),
         "p90_annual_savings": case.get("p90_annual_savings"),
@@ -272,6 +309,7 @@ def candidate_row(case: dict[str, Any]) -> dict[str, Any]:
         "outage_backup_hours": case["outage_backup_hours"],
         "score": case["final_score"],
         "passes_payback_threshold": bool(case.get("passes_payback_threshold", False)),
+        "value_driver": value_driver,
     }
 
 
@@ -301,6 +339,20 @@ def annual_simulation_diagnostics(
             float(metrics["exported_pv_kwh"]) * annualization_factor,
             2,
         ),
+        "annual_battery_shifted_kwh": round(
+            float(metrics.get("battery_shifted_kwh", metrics.get("battery_discharged_kwh", 0.0))) * annualization_factor,
+            2,
+        ),
+        "annual_import_savings_before_export_credit": round(
+            float(metrics.get("import_savings_before_export_credit", 0.0)) * annualization_factor,
+            2,
+        ),
+        "annual_raw_energy_savings": round(float(metrics.get("raw_energy_savings", 0.0)) * annualization_factor, 2),
+        "annual_savings_after_minimum_bill": round(
+            float(metrics.get("bill_savings_after_minimum", 0.0)) * annualization_factor,
+            2,
+        ),
+        "annual_minimum_bill": round(float(metrics.get("minimum_bill", 0.0)) * annualization_factor, 2),
         "self_consumed_pv_kwh": round(float(metrics["self_consumed_pv_kwh"]) * annualization_factor, 2),
         "self_consumption_ratio": round(float(metrics["self_consumption_ratio"]), 4),
         "average_annual_savings": round(float(case.get("average_annual_savings", case["annual_savings"])), 2),
@@ -483,6 +535,9 @@ def optimize(request: OptimizeRequest = Body(default_factory=OptimizeRequest)) -
             "reserve_soc_fraction": scenario.reserve_soc_fraction,
             "load_profile_type": scenario.load_profile_type,
             "custom_load_shape_note": custom_load_shape_note(scenario),
+            "tariff_mode": scenario.tariff_mode,
+            "minimum_monthly_bill_kwh": scenario.minimum_monthly_bill_kwh,
+            "minimum_monthly_bill_estimate": scenario.minimum_monthly_bill_kwh * scenario.grid_tariff_per_kwh,
             "export_credit_modeled": True,
             "export_credit_per_kwh": scenario.export_credit_per_kwh,
             "export_credit_note": "Surplus PV is credited using the configured export credit. No country-specific policy is hardcoded.",

@@ -236,7 +236,7 @@ npm run build
 
 - `POST /optimize`
   - Runs the battery-size sweep for `0, 5, 10, 13.5, 15, 20, 30 kWh`.
-  - Returns the recommended size, comparison table, dispatch series, assumptions, and diagnostics.
+  - Returns the recommended size, comparison table, dispatch series, value breakdown, assumptions, and diagnostics.
 
 - `POST /prefetch-annual-economics`
   - Downloads or loads cached NASA POWER historical irradiance for the selected location.
@@ -283,10 +283,13 @@ python3 packages/ml/build_forecast_error_artifact.py
 - Default system efficiency: `0.8`.
 - Battery round-trip efficiency: `0.9`.
 - Battery charges from PV surplus.
-- Battery discharges when load exceeds PV and during the peak tariff window.
-- Peak tariff window: `18:00-21:00`.
-- Export credit: configurable value per exported kWh, default `0`.
+- Battery discharges when load exceeds PV.
+- Main user-facing tariff mode: flat tariff.
+- Consumption input: monthly kWh, converted internally to average daily kWh.
+- Export credit: configurable value per exported kWh, default equal to the demo grid tariff.
+- Minimum monthly bill: configurable as equivalent kWh/month, default `100 kWh/month`.
 - Battery sizes: `0, 5, 10, 13.5, 15, 20, 30 kWh`.
+- Recommendation rule: if no battery creates positive post-minimum-bill savings, recommend `0 kWh` rather than a resilience-only battery.
 - Annual economics: NASA POWER `2001-2025` when available. No fabricated historical weather fallback is used.
 - ML: forecast-error uncertainty only; dispatch uses the raw Open-Meteo forecast.
 - Financial results come from deterministic simulation, not ML.
