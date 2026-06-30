@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "BESSAi",
+  title: "BESSAí",
   description: "Battery sizing and dispatch dashboard for solar users",
 };
 

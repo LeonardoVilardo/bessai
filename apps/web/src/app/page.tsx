@@ -11,7 +11,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { FormEvent, ReactNode, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
 import defaultDemoResult from "@/data/default-demo-result.json";
 import westBahiaDemoResult from "@/data/west-bahia-demo-result.json";
 
@@ -428,50 +428,29 @@ function AnnualSavingsBand({
 }) {
   if (
     !recommendation ||
-    recommendation.average_annual_savings === null ||
     recommendation.p90_annual_savings === null
   ) {
     return null;
   }
 
   const p50 = recommendation.annualised_savings_estimate;
-  const average = recommendation.average_annual_savings;
   const p90 = recommendation.p90_annual_savings;
-  const min = Math.min(p90, p50, average);
-  const max = Math.max(p90, p50, average);
-  const spread = max - min;
-  const position = (value: number) => (spread === 0 ? 50 : ((value - min) / spread) * 100);
 
   return (
-    <div className="mt-3 border-t border-slate-100 pt-3">
-      <div className="relative h-2 rounded-full bg-slate-100">
-        <div
-          className="absolute top-0 h-2 rounded-full bg-green-200"
-          style={{
-            left: `${Math.min(position(p90), position(p50))}%`,
-            width: `${Math.abs(position(p50) - position(p90))}%`,
-          }}
-        />
-        <span
-          aria-hidden
-          className="absolute top-1/2 h-3 w-0.5 -translate-y-1/2 rounded-full bg-slate-500"
-          style={{ left: `${position(p90)}%` }}
-        />
-        <span
-          aria-hidden
-          className="absolute top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-green-700"
-          style={{ left: `${position(p50)}%` }}
-        />
-        <span
-          aria-hidden
-          className="absolute top-1/2 h-3 w-0.5 -translate-y-1/2 rounded-full bg-blue-500"
-          style={{ left: `${position(average)}%` }}
-        />
+    <div className="mt-3 grid gap-1 border-t border-slate-100 pt-3 text-[11px] text-slate-600">
+      <div className="flex items-baseline justify-between gap-2">
+        <span>Typical year</span>
+        <span className="font-medium tabular-nums text-slate-900">
+          {formatCurrency(p50, currency)}
+        </span>
       </div>
-      <div className="mt-2 grid grid-cols-3 gap-2 text-[10px] leading-tight text-slate-500">
-        <span>P90 {formatCurrency(p90, currency)}</span>
-        <span className="text-center">P50 {formatCurrency(p50, currency)}</span>
-        <span className="text-right">Avg {formatCurrency(average, currency)}</span>
+      <div className="flex items-baseline justify-between gap-2">
+        <LabelWithHelp help="Conservative weather year: 9 out of 10 historical years gave better savings than this.">
+          <span>Bad-weather year</span>
+        </LabelWithHelp>
+        <span className="tabular-nums text-slate-700">
+          {formatCurrency(p90, currency)}
+        </span>
       </div>
     </div>
   );
@@ -487,7 +466,7 @@ function formatValueDriver(value: string) {
   if (value === "resilience") {
     return "Mainly resilience";
   }
-  return "Weak";
+  return "Limited value";
 }
 
 function NumberField({
@@ -714,6 +693,62 @@ function buildRationale(
   return lines;
 }
 
+const LOADING_STEPS = [
+  { label: "Fetching solar forecast (Open-Meteo)", until: 5 },
+  { label: "Loading 25 years of historical weather (NASA POWER)", until: 25 },
+  { label: "Sweeping battery sizes and computing payback", until: 50 },
+];
+
+function LoadingSteps() {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    const start = Date.now();
+    const id = window.setInterval(() => {
+      setElapsed(Math.floor((Date.now() - start) / 1000));
+    }, 250);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const pendingIndex = LOADING_STEPS.findIndex((step) => elapsed < step.until);
+  const activeIndex = pendingIndex === -1 ? LOADING_STEPS.length - 1 : pendingIndex;
+
+  return (
+    <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs leading-relaxed text-blue-900">
+      <p className="mb-2 font-medium">
+        Running optimisation… {elapsed}s elapsed (typically up to 50s)
+      </p>
+      <ol className="grid gap-1.5">
+        {LOADING_STEPS.map((step, idx) => {
+          const isDone = idx < activeIndex;
+          const isActive = idx === activeIndex;
+          const markerClass = isDone
+            ? "bg-blue-600 text-white"
+            : isActive
+              ? "border border-blue-600 text-blue-700 animate-pulse"
+              : "border border-blue-200 text-blue-300";
+          const labelClass = isActive
+            ? "font-medium text-blue-900"
+            : isDone
+              ? "text-blue-800"
+              : "text-blue-400";
+          return (
+            <li key={step.label} className="flex items-start gap-2">
+              <span
+                aria-hidden
+                className={`mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold leading-none ${markerClass}`}
+              >
+                {isDone ? "✓" : idx + 1}
+              </span>
+              <span className={labelClass}>{step.label}</span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 export default function Home() {
   const [scenario, setScenario] = useState(defaultScenario);
   const [data, setData] = useState<OptimizeResponse | null>(defaultOptimizeResponse);
@@ -873,37 +908,59 @@ export default function Home() {
     <main className="min-h-screen bg-slate-50 text-slate-900">
       <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
         <header className="flex flex-col gap-3 border-b border-slate-200 pb-4 md:flex-row md:items-end md:justify-between">
-          <div className="grid gap-1">
+          <div className="grid gap-1.5">
             <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-slate-500">
-              BESSAi · battery decision-support
+              BESSAí · battery decision-support
             </p>
-            <h1 className="text-2xl font-semibold tracking-tight text-slate-900 sm:text-[26px]">
-              Sizing &amp; dispatch dashboard
-            </h1>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-2xl font-semibold tracking-tight text-slate-900 sm:text-[26px]">
+                Sizing &amp; dispatch dashboard
+              </h1>
+              {data ? (
+                <span
+                  className={`rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.1em] ${
+                    isBundledDemoSnapshot
+                      ? "border-slate-300 bg-slate-100 text-slate-600"
+                      : "border-green-300 bg-green-50 text-green-700"
+                  }`}
+                >
+                  {isBundledDemoSnapshot ? "Bundled demo" : "Live result"}
+                </span>
+              ) : null}
+            </div>
+            <p className="max-w-2xl text-sm leading-relaxed text-slate-600">
+              Should you add a battery to a solar PV system? This runs a 24-hour
+              dispatch and a 25-year historical weather simulation to size the
+              battery, estimate payback, and quantify backup hours.
+            </p>
           </div>
-          <dl className="grid gap-1 text-xs text-slate-600 md:text-right">
-            <div className="flex items-center gap-2 md:justify-end">
-              <span
-                aria-hidden
-                className={`inline-block h-1.5 w-1.5 rounded-full ${data ? "bg-green-600" : "bg-slate-300"}`}
-              />
-              <dt className="sr-only">Forecast source</dt>
-              <dd className="font-mono text-slate-700">
-                {data?.forecast_source ?? "Awaiting run"}
+          <dl className="grid gap-1.5 text-xs text-slate-600 md:min-w-[280px]">
+            <div className="grid grid-cols-[88px_minmax(0,1fr)] items-baseline gap-3">
+              <dt className="text-[11px] uppercase tracking-[0.1em] text-slate-500">
+                Forecast
+              </dt>
+              <dd className="flex items-center gap-1.5 text-slate-700">
+                <span
+                  aria-hidden
+                  className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${data ? "bg-green-600" : "bg-slate-300"}`}
+                />
+                <span>{data?.forecast_source ?? "Awaiting run"}</span>
               </dd>
             </div>
-            <div>
-              <dt className="sr-only">Economics source</dt>
-              <dd className="font-mono text-slate-700">
+            <div className="grid grid-cols-[88px_minmax(0,1fr)] items-baseline gap-3">
+              <dt className="text-[11px] uppercase tracking-[0.1em] text-slate-500">
+                Economics
+              </dt>
+              <dd className="text-slate-700">
                 {data?.economics_source ?? "Annual economics pending"}
               </dd>
             </div>
-            <div>
-              <dt className="sr-only">Site</dt>
-              <dd className="tabular-nums">
-                {scenario.location_name} ·{" "}
-                {formatNumber(scenario.latitude, 3)},{" "}
-                {formatNumber(scenario.longitude, 3)}
+            <div className="grid grid-cols-[88px_minmax(0,1fr)] items-baseline gap-3">
+              <dt className="text-[11px] uppercase tracking-[0.1em] text-slate-500">
+                Site
+              </dt>
+              <dd className="tabular-nums text-slate-700">
+                {scenario.location_name}
               </dd>
             </div>
           </dl>
@@ -922,8 +979,8 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={() => {
-                    setScenario(defaultScenario);
-                    setData(defaultOptimizeResponse);
+                    setScenario(currentLocationPreset.demoResult.scenario);
+                    setData(currentLocationPreset.demoResult);
                     setError(null);
                     setDispatchMode("battery");
                   }}
@@ -964,7 +1021,7 @@ export default function Home() {
                       Latitude
                     </span>
                     <div className="flex h-9 items-center rounded-md border border-slate-200 bg-slate-50 px-2.5 text-sm tabular-nums text-slate-700">
-                      {formatNumber(scenario.latitude, 6)}
+                      {formatNumber(scenario.latitude, 3)}
                     </div>
                   </div>
                   <div className="grid gap-1">
@@ -972,12 +1029,12 @@ export default function Home() {
                       Longitude
                     </span>
                     <div className="flex h-9 items-center rounded-md border border-slate-200 bg-slate-50 px-2.5 text-sm tabular-nums text-slate-700">
-                      {formatNumber(scenario.longitude, 6)}
+                      {formatNumber(scenario.longitude, 3)}
                     </div>
                   </div>
                 </div>
                 <p className="text-[11px] leading-relaxed text-slate-500">
-                  Annual economics load from local cache or NASA POWER when optimisation runs.
+                  Historical weather (NASA POWER, 2001–2025) is used for annual estimates.
                 </p>
               </FormSection>
 
@@ -995,7 +1052,7 @@ export default function Home() {
                   label="Monthly consumption"
                   value={scenario.average_monthly_consumption_kwh}
                   suffix="kWh/month"
-                  help="Typical monthly consumption from the bill. BESSAi converts this to an average daily load internally."
+                  help="Typical monthly consumption from the bill. BESSAí converts this to an average daily load internally."
                   onChange={(value) =>
                     setScenario((current) => ({
                       ...current,
@@ -1139,7 +1196,7 @@ export default function Home() {
                     value={scenario.grid_tariff_per_kwh}
                     step={0.01}
                     suffix="/kWh"
-                    help="Flat import price paid for grid electricity. The main MVP does not assume time-of-use tariffs."
+                    help="Flat import price paid for grid electricity. The main model does not assume time-of-use tariffs."
                     onChange={(value) =>
                       setScenario((current) => ({
                         ...current,
@@ -1168,7 +1225,7 @@ export default function Home() {
                   value={scenario.minimum_monthly_bill_kwh}
                   step={1}
                   suffix="kWh/month"
-                  help="Minimum monthly bill expressed as equivalent kWh. BESSAi multiplies this by the grid tariff and applies it as a monthly bill floor."
+                  help="Minimum monthly bill expressed as equivalent kWh. BESSAí multiplies this by the grid tariff and applies it as a monthly bill floor."
                   onChange={(value) =>
                     setScenario((current) => ({
                       ...current,
@@ -1193,12 +1250,7 @@ export default function Home() {
                     : "Run optimisation"}
               </button>
 
-              {isLoading ? (
-                <p className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs leading-relaxed text-blue-800">
-                  This may take up to 50 seconds. Please hold on while BESSAi
-                  loads forecast, historical economics, and optimisation results.
-                </p>
-              ) : null}
+              {isLoading ? <LoadingSteps /> : null}
 
               {inputsChangedSinceRun ? (
                 <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800">
@@ -1230,9 +1282,19 @@ export default function Home() {
               <div className="grid gap-4 p-5 xl:grid-cols-[minmax(0,1fr)_320px]">
                 <div className="grid gap-3 sm:grid-cols-2">
                   <MetricCard
-                    label="Recommended size"
-                    value={recommendation ? `${recommendation.battery_size_kwh}` : "—"}
-                    unit={recommendation ? "kWh" : undefined}
+                    label="Recommendation"
+                    value={
+                      recommendation
+                        ? recommendation.battery_size_kwh === 0
+                          ? "Skip battery"
+                          : `${recommendation.battery_size_kwh}`
+                        : "—"
+                    }
+                    unit={
+                      recommendation && recommendation.battery_size_kwh > 0
+                        ? "kWh"
+                        : undefined
+                    }
                     help="Battery size selected from the discrete candidate set using savings, payback, and backup resilience."
                     hint={
                       recommendation
@@ -1247,8 +1309,8 @@ export default function Home() {
                     }
                   />
                   <MetricCard
-                    label="P50 annual savings"
-                    help="Median annual bill savings across historical weather years after export-credit effects and the minimum monthly bill floor."
+                    label="Typical annual savings"
+                    help="Median annual bill savings across 25 historical weather years (P50), after export-credit effects and the minimum monthly bill floor."
                     value={
                       recommendation
                         ? formatCurrency(
@@ -1258,12 +1320,9 @@ export default function Home() {
                         : "—"
                     }
                     hint={
-                      recommendation?.p90_annual_savings !== null &&
-                      recommendation?.p90_annual_savings !== undefined
-                        ? `P90: ${formatCurrency(recommendation.p90_annual_savings, scenario.currency)}`
-                        : recommendation
-                          ? "Historical-year model when available"
-                          : ""
+                      recommendation
+                        ? "Median weather year (P50)"
+                        : ""
                     }
                   >
                     <AnnualSavingsBand
@@ -1419,10 +1478,19 @@ export default function Home() {
               <header className="flex flex-col gap-3 border-b border-slate-200 px-5 py-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-900">
-                    Tomorrow&apos;s dispatch
+                    Next-day dispatch
                   </h2>
                   <p className="text-xs text-slate-500">
                     Hourly profile · {dispatchMode === "battery" ? "recommended battery" : "no-battery baseline"}
+                    {data?.dispatch?.[0]?.time
+                      ? ` · forecast for ${new Intl.DateTimeFormat("en-GB", {
+                          day: "numeric",
+                          month: "short",
+                          year: "numeric",
+                          timeZone: "UTC",
+                        }).format(new Date(`${data.dispatch[0].time.slice(0, 10)}T00:00:00Z`))}`
+                      : ""}
+                    {isBundledDemoSnapshot ? " · bundled demo" : ""}
                   </p>
                 </div>
                 <div className="grid gap-2 sm:justify-items-end">
@@ -1705,13 +1773,21 @@ export default function Home() {
                     Run an optimisation to see why a particular battery size is recommended.
                   </p>
                 )}
-                <div className="mt-4 grid gap-1.5 border-t border-slate-100 pt-3 text-xs text-slate-500 sm:grid-cols-2">
-                  <p>Score = 0.5 · savings + 0.3 · resilience + 0.2 · payback.</p>
-                  <p>Backup hours are capped at 8 h when scoring.</p>
-                  <p>ML estimates forecast uncertainty; dispatch uses the raw forecast.</p>
-                  <p>
-                    Annual savings use real NASA POWER historical weather years.
-                  </p>
+                <div className="mt-4 grid gap-3 border-t border-slate-100 pt-3 text-xs leading-relaxed text-slate-500 sm:grid-cols-2">
+                  <div className="grid gap-1">
+                    <p className="font-semibold uppercase tracking-[0.1em] text-slate-600">
+                      How we score
+                    </p>
+                    <p>Score = 0.5 · savings + 0.3 · resilience + 0.2 · payback.</p>
+                    <p>Backup hours are capped at 8 h when scoring, so the optimiser does not over-size for outages alone.</p>
+                  </div>
+                  <div className="grid gap-1">
+                    <p className="font-semibold uppercase tracking-[0.1em] text-slate-600">
+                      What we model
+                    </p>
+                    <p>Annual savings use real NASA POWER historical weather years (2001–2025).</p>
+                    <p>Dispatch uses the raw Open-Meteo forecast; ML only estimates forecast uncertainty and does not move money.</p>
+                  </div>
                 </div>
               </div>
             </section>
@@ -1781,7 +1857,7 @@ export default function Home() {
                         )}
                       />
                       <DiagnosticItem
-                        label="P50 annual savings"
+                        label="Median annual savings"
                         help="Median annual savings across the simulated historical weather years; this is used for recommendation when multi-year economics are available."
                         value={formatCurrency(
                           data.model_diagnostics.annual_simulation.p50_annual_savings,
@@ -1789,7 +1865,7 @@ export default function Home() {
                         )}
                       />
                       <DiagnosticItem
-                        label="P90 annual savings"
+                        label="Conservative annual savings"
                         help="10th-percentile annual savings: a conservative weather-year estimate where 90% of simulated years are better."
                         value={formatCurrency(
                           data.model_diagnostics.annual_simulation.p90_annual_savings,
@@ -2024,8 +2100,63 @@ export default function Home() {
           </section>
         </div>
 
+        <section className="rounded-md border border-slate-200 bg-white">
+          <details className="group/disclosure">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-5 py-3">
+              <span>
+                <span className="block text-sm font-semibold text-slate-900">
+                  About this project
+                </span>
+                <span className="mt-0.5 block text-xs text-slate-500">
+                  What it is, why it exists, and what it intentionally does not do.
+                </span>
+              </span>
+              <span className="text-xl leading-none text-slate-400 transition group-open/disclosure:rotate-45">
+                +
+              </span>
+            </summary>
+            <div className="grid gap-3 border-t border-slate-200 px-5 py-4 text-sm leading-relaxed text-slate-700">
+              <p>
+                <span className="font-semibold text-slate-900">What it is.</span>{" "}
+                A sizing study that answers a single question for a specific
+                site: would adding a battery to an existing or planned solar PV
+                system actually pay back, and how much grid-outage cover would
+                it provide?
+              </p>
+              <p>
+                <span className="font-semibold text-slate-900">Why it exists.</span>{" "}
+                Built as a first-pass screening tool before commissioning a paid
+                engineering study. The two demo sites are a farm in west Bahia
+                and a house in Brasília.
+              </p>
+              <p>
+                <span className="font-semibold text-slate-900">How it works.</span>{" "}
+                Financial results come from an hour-by-hour deterministic
+                simulation run against 25 years of real NASA POWER weather
+                history. A battery-size sweep picks the recommended size on
+                savings, payback, and resilience. The next-day dispatch chart
+                uses Open-Meteo forecast data, with cached or bundled snapshots
+                when needed for demo reliability.
+              </p>
+              <p>
+                <span className="font-semibold text-slate-900">What the ML does (and does not) do.</span>{" "}
+                A small gradient-boosting model is used only to quantify
+                forecast uncertainty for the next-day chart. It does not change
+                the dispatch and it does not produce the financial figures.
+              </p>
+              <p>
+                <span className="font-semibold text-slate-900">Out of scope.</span>{" "}
+                Time-of-use tariffs, battery degradation over lifetime,
+                regulatory aspects of grid export, and weather regimes outside
+                the historical record. The figures are a screening estimate,
+                not a substitute for a commissioned engineering study.
+              </p>
+            </div>
+          </details>
+        </section>
+
         <footer className="border-t border-slate-200 pt-4 text-xs text-slate-500">
-          BESSAi MVP · deterministic dispatch with historical annual economics · prices in {scenario.currency}.
+          BESSAí · deterministic dispatch with historical annual economics · prices in {scenario.currency}.
         </footer>
       </div>
     </main>
